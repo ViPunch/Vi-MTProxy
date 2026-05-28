@@ -219,8 +219,12 @@ add_client() {
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    # mtg v2: секрет 32 байта с префиксом "ee" (64 hex символа)
-    secret="ee$(head -c 31 /dev/urandom | xxd -p | tr -d '\n')"
+    # mtg v2: ee + 16 байт домен (с null-паддингом) + 16 байт ключ
+    local domain_bytes
+    domain_bytes=$(printf '%-16s' "$sni_domain" | head -c 16 | xxd -p | tr -d '\n')
+    local key_bytes
+    key_bytes=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
+    secret="ee${domain_bytes}${key_bytes}"
 
     # Сохранение
     mkdir -p "$MTG_DIR"
