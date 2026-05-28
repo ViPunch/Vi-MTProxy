@@ -390,7 +390,13 @@ bind_eu_server() {
     read -rp "Введите IP EU-сервера: " eu_ip
     [[ -z "$eu_ip" ]] && { echo "IP не может быть пустым."; return 1; }
 
+    echo "cascade" > "$MODE_FILE"
     echo "$eu_ip" > "$EU_IP_FILE"
+
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "EU-сервер привязан: $eu_ip. Клиентов пока нет."
+        return 0
+    fi
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
@@ -399,7 +405,7 @@ bind_eu_server() {
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         write_toml "$cname" "$csecret" "$cport"
-        systemctl restart "mtg-${cname}"
+        timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
     echo "EU-сервер привязан: $eu_ip"
@@ -408,6 +414,12 @@ bind_eu_server() {
 unbind_eu_server() {
     echo "single" > "$MODE_FILE"
 
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        rm -f "$EU_IP_FILE"
+        echo "EU-сервер отвязан. Режим: одиночный."
+        return 0
+    fi
+
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname csecret cport
@@ -415,7 +427,7 @@ unbind_eu_server() {
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         write_toml "$cname" "$csecret" "$cport"
-        systemctl restart "mtg-${cname}" 2>/dev/null || true
+        timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
     rm -f "$EU_IP_FILE"
@@ -612,15 +624,17 @@ if [[ $# -ge 2 && "$1" == "set-eu" ]]; then
     echo "$eu_ip" > "$EU_IP_FILE"
     echo "cascade" > "$MODE_FILE"
 
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname csecret cport
-        cname=$(conf_field "$line" 1)
-        csecret=$(conf_field "$line" 2)
-        cport=$(conf_field "$line" 3)
-        write_toml "$cname" "$csecret" "$cport"
-        systemctl restart "mtg-${cname}" 2>/dev/null || true
-    done < "$CLIENTS_CONF"
+    if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local cname csecret cport
+            cname=$(conf_field "$line" 1)
+            csecret=$(conf_field "$line" 2)
+            cport=$(conf_field "$line" 3)
+            write_toml "$cname" "$csecret" "$cport"
+            timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+        done < "$CLIENTS_CONF"
+    fi
 
     echo "EU-сервер привязан: $eu_ip"
     echo "Все сервисы перезапущены."
