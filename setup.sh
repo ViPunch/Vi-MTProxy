@@ -455,8 +455,8 @@ remove_all() {
             [[ -z "$line" ]] && continue
             local cname
             cname=$(conf_field "$line" 1)
-            systemctl stop "mtg-${cname}" 2>/dev/null || true
-            systemctl disable "mtg-${cname}" 2>/dev/null || true
+            timeout 10 systemctl stop "mtg-${cname}" 2>/dev/null || true
+            timeout 10 systemctl disable "mtg-${cname}" 2>/dev/null || true
             rm -f "/etc/systemd/system/mtg-${cname}.service" "$MTG_DIR/${cname}.toml"
         done < "$CLIENTS_CONF"
     fi
