@@ -164,15 +164,17 @@ configure_warp() {
     # Ждем подключения
     echo "Ожидаю подключения WARP (до 30 секунд)..."
     local attempts=0
-    while (( attempts < 15 )); do
-        if warp-cli status 2>/dev/null | grep -q "Connected"; then
+    while [[ $attempts -lt 15 ]]; do
+        local status_output
+        status_output=$(warp-cli status 2>&1) || true
+        echo "Попытка $((attempts + 1))/15: $status_output"
+        if echo "$status_output" | grep -q "Connected"; then
             echo "WARP подключен!"
             log "WARP подключен"
             return 0
         fi
         sleep 2
-        (( attempts++ ))
-        echo "Попытка $attempts/15..."
+        attempts=$((attempts + 1))
     done
 
     die "WARP не подключился за 30 секунд. Проверьте: warp-cli status"
@@ -249,13 +251,23 @@ EOF
 
     log "Туннель создан и запущен"
 
+    local eu_ip
+    eu_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "не удалось определить")
+
     echo ""
     echo "============================================================"
     echo "Туннель создан!"
     echo "gost слушает SOCKS5 на порту 1080."
     echo "Трафик форвардится через WARP."
     echo ""
-    echo "Вернитесь на RU-сервер — каскад готов к работе."
+    echo "IP этого EU-сервера: $eu_ip"
+    echo ""
+    echo "ТЕПЕРЬ вернитесь на RU-сервер и:"
+    echo "1. Запустите: vi-mtpro"
+    echo "2. Выберите: Управление → Привязать EU-сервер"
+    echo "3. Введите IP: $eu_ip"
+    echo ""
+    echo "После этого каскад будет работать."
     echo "============================================================"
 }
 
