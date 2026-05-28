@@ -15,13 +15,10 @@ die() { echo "ОШИБКА: $*" >&2; exit 1; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 step() { echo ""; echo "=== $* ==="; log "Шаг: $*"; }
 
-# Очищает N строк вверх от курсора
-clear_lines() {
-    local n="${1:-10}"
-    for ((i=0; i<n; i++)); do
-        echo -ne "\033[1A\033[2K"
-    done
-}
+# Сохраняем/восстанавливаем позицию меню без очистки всего терминала.
+menu_mark() { echo -ne "\033[s"; }
+menu_rewind() { echo -ne "\033[u"; }
+menu_line() { echo -ne "\033[2K"; echo "$1"; }
 
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -386,27 +383,28 @@ delete_all() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
-    local first_run=true
+    local menu_saved=false
     while true; do
-        if [[ "$first_run" == false ]]; then
-            clear_lines 7
+        if [[ "$menu_saved" == false ]]; then
+            menu_mark
+            menu_saved=true
+        else
+            menu_rewind
         fi
-        first_run=false
 
-        echo ""
-        echo "=== MTProxy Tunnel (EU) ==="
-        echo "1) Создать туннель (установить gost + WARP)"
-        echo "2) Статус туннеля"
-        echo "3) Удалить туннель (только gost)"
-        echo "0) Выход"
-        echo ""
+        menu_line ""
+        menu_line "=== MTProxy Tunnel (EU) ==="
+        menu_line "1) Создать туннель (установить gost + WARP)"
+        menu_line "2) Статус туннеля"
+        menu_line "3) Удалить туннель (только gost)"
+        menu_line "0) Выход"
+        menu_line ""
+        echo -ne "\033[2K"
         read -rp "Выбор: " choice
 
-        clear_lines 1
-
         case "$choice" in
-            1) create_tunnel; first_run=true ;;
-            2) tunnel_status; read -rp "Нажмите Enter для продолжения..."; first_run=true ;;
+            1) create_tunnel ;;
+            2) tunnel_status; read -rp "Нажмите Enter для продолжения..." ;;
             3) delete_tunnel ;;
             0) exit 0 ;;
             *) echo "Неверный выбор."; sleep 1 ;;
