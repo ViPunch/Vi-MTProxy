@@ -15,6 +15,14 @@ die() { echo "ОШИБКА: $*" >&2; exit 1; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 step() { echo ""; echo "=== $* ==="; log "Шаг: $*"; }
 
+# Очищает N строк вверх от курсора
+clear_lines() {
+    local n="${1:-10}"
+    for ((i=0; i<n; i++)); do
+        echo -ne "\033[1A\033[2K"
+    done
+}
+
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         die "Запустите скрипт от root: sudo bash $0"
@@ -378,7 +386,13 @@ delete_all() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
+    local first_run=true
     while true; do
+        if [[ "$first_run" == false ]]; then
+            clear_lines 7
+        fi
+        first_run=false
+
         echo ""
         echo "=== MTProxy Tunnel (EU) ==="
         echo "1) Создать туннель (установить gost + WARP)"
@@ -387,12 +401,15 @@ main_menu() {
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
+
+        clear_lines 1
+
         case "$choice" in
-            1) create_tunnel ;;
-            2) tunnel_status ;;
+            1) create_tunnel; first_run=true ;;
+            2) tunnel_status; read -rp "Нажмите Enter для продолжения..."; first_run=true ;;
             3) delete_tunnel ;;
             0) exit 0 ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
     done
 }

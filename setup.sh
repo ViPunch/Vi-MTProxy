@@ -34,6 +34,20 @@ SNI_LIST=(
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
+# Сохраняет текущую позицию курсора
+save_cursor() { echo -ne "\033[s"; }
+
+# Восстанавливает позицию курсора
+restore_cursor() { echo -ne "\033[u"; }
+
+# Очищает N строк вверх от курсора
+clear_lines() {
+    local n="${1:-10}"
+    for ((i=0; i<n; i++)); do
+        echo -ne "\033[1A\033[2K"
+    done
+}
+
 kill_service() {
     local svc="$1"
     # Находим PID и убиваем напрямую
@@ -322,7 +336,13 @@ delete_client() {
 }
 
 manage_clients() {
+    local first_run=true
     while true; do
+        if [[ "$first_run" == false ]]; then
+            clear_lines 7
+        fi
+        first_run=false
+
         echo ""
         echo "=== Управление клиентами ==="
         echo "1) Список клиентов"
@@ -331,12 +351,15 @@ manage_clients() {
         echo "0) Назад"
         echo ""
         read -rp "Выбор: " choice
+
+        clear_lines 1
+
         case "$choice" in
-            1) list_clients ;;
-            2) add_client ;;
-            3) delete_client ;;
+            1) list_clients; read -rp "Нажмите Enter для продолжения..."; first_run=true ;;
+            2) add_client; first_run=true ;;
+            3) delete_client; first_run=true ;;
             0) return ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
     done
 }
@@ -506,9 +529,21 @@ remove_all() {
 }
 
 manage_menu() {
+    local first_run=true
     while true; do
         local mode
         mode=$(read_mode)
+
+        local menu_lines=10
+        if [[ "$mode" == "cascade" ]]; then
+            menu_lines=12
+        fi
+
+        if [[ "$first_run" == false ]]; then
+            clear_lines "$menu_lines"
+        fi
+        first_run=false
+
         echo ""
         echo "=== Управление ==="
         echo "1) Перезапустить все сервисы"
@@ -524,21 +559,36 @@ manage_menu() {
         echo "0) Назад"
         echo ""
         read -rp "Выбор: " choice
+
+        clear_lines 1
+
         case "$choice" in
-            1) restart_all; read -rp "Нажмите Enter..." ;;
-            2) update_mtg; read -rp "Нажмите Enter..." ;;
-            3) force_stop_all ;;
+            1) restart_all; read -rp "Нажмите Enter..."; first_run=true ;;
+            2) update_mtg; read -rp "Нажмите Enter..."; first_run=true ;;
+            3) force_stop_all; first_run=true ;;
             4)
                 if [[ "$mode" == "cascade" ]]; then
-                    bind_eu_server
+                    bind_eu_server; first_run=true
                 else
                     remove_all
                 fi
                 ;;
-            5) [[ "$mode" == "cascade" ]] && unbind_eu_server || echo "Неверный выбор." ;;
-            6) [[ "$mode" == "cascade" ]] && remove_all || echo "Неверный выбор." ;;
+            5)
+                if [[ "$mode" == "cascade" ]]; then
+                    unbind_eu_server; first_run=true
+                else
+                    echo "Неверный выбор."; sleep 1
+                fi
+                ;;
+            6)
+                if [[ "$mode" == "cascade" ]]; then
+                    remove_all
+                else
+                    echo "Неверный выбор."; sleep 1
+                fi
+                ;;
             0) return ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
     done
 }
@@ -646,6 +696,7 @@ switch_mode() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
+    local first_run=true
     while true; do
         local mode
         mode=$(read_mode)
@@ -659,6 +710,12 @@ main_menu() {
             mode_label="одиночный"
         fi
 
+        # Перерисовываем меню на месте (кроме первого раза)
+        if [[ "$first_run" == false ]]; then
+            clear_lines 9
+        fi
+        first_run=false
+
         echo ""
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
@@ -671,14 +728,18 @@ main_menu() {
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
+
+        # Очищаем строку с выбором перед выполнением действия
+        clear_lines 1
+
         case "$choice" in
-            1) manage_clients ;;
-            2) show_links ;;
-            3) show_status ;;
-            4) manage_menu ;;
-            5) switch_mode ;;
+            1) manage_clients; first_run=true ;;
+            2) show_links; read -rp "Нажмите Enter для продолжения..."; first_run=true ;;
+            3) show_status; read -rp "Нажмите Enter для продолжения..."; first_run=true ;;
+            4) manage_menu; first_run=true ;;
+            5) switch_mode; first_run=true ;;
             0) exit 0 ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
     done
 }
