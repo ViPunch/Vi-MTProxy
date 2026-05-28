@@ -249,16 +249,8 @@ add_client() {
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    # mtg v2: ee + 16 байт AES ключ + 16 байт домен (null-паддинг)
-    local key_bytes
-    key_bytes=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
-    local domain_bytes
-    domain_bytes=$(printf '%s' "$sni_domain" | head -c 16 | xxd -p | tr -d '\r\n')
-    # Паддинг до 32 hex символов (16 байт)
-    while [[ ${#domain_bytes} -lt 32 ]]; do
-        domain_bytes="${domain_bytes}00"
-    done
-    secret="ee${key_bytes}${domain_bytes}"
+    secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null) \
+        || die "Ошибка генерации секрета. Проверьте: mtg generate-secret $sni_domain"
 
     # Сохранение
     mkdir -p "$MTG_DIR"
