@@ -34,6 +34,13 @@ SNI_LIST=(
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
+kill_service() {
+    local svc="$1"
+    systemctl kill "$svc" 2>/dev/null || true
+    sleep 1
+    systemctl stop "$svc" 2>/dev/null || true
+}
+
 get_public_ip() {
     curl -s --max-time 5 https://api.ipify.org || echo "UNKNOWN"
 }
@@ -286,8 +293,8 @@ delete_client() {
     local port
     port=$(conf_field "$line" 3)
 
-    timeout 5 systemctl stop "mtg-${name}" 2>/dev/null || true
-    timeout 5 systemctl disable "mtg-${name}" 2>/dev/null || true
+    kill_service "mtg-${name}"
+    systemctl disable "mtg-${name}" 2>/dev/null || true
     rm -f "/etc/systemd/system/mtg-${name}.service" "$MTG_DIR/${name}.toml"
 
     # Удаляем строку из clients.conf
@@ -371,8 +378,7 @@ force_stop_all() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        timeout 5 systemctl kill "mtg-${cname}" 2>/dev/null || true
-        timeout 5 systemctl stop "mtg-${cname}" 2>/dev/null || true
+        kill_service "mtg-${cname}"
         echo "Остановлен: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
@@ -386,7 +392,8 @@ restart_all() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        timeout 10 systemctl restart "mtg-${cname}" && echo "Перезапущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
+        kill_service "mtg-${cname}"
+        systemctl start "mtg-${cname}" && echo "Перезапущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
@@ -399,7 +406,7 @@ update_mtg() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        timeout 10 systemctl stop "mtg-${cname}" 2>/dev/null || true
+        kill_service "mtg-${cname}"
     done < "$CLIENTS_CONF"
 
     install_mtg_binary
@@ -408,7 +415,7 @@ update_mtg() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        timeout 10 systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
+        systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
@@ -432,7 +439,8 @@ bind_eu_server() {
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         write_toml "$cname" "$csecret" "$cport"
-        timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+        kill_service "mtg-${cname}"
+        systemctl start "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
     echo "EU-сервер привязан: $eu_ip"
@@ -454,7 +462,8 @@ unbind_eu_server() {
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         write_toml "$cname" "$csecret" "$cport"
-        timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+        kill_service "mtg-${cname}"
+        systemctl start "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
     rm -f "$EU_IP_FILE"
@@ -470,8 +479,8 @@ remove_all() {
             [[ -z "$line" ]] && continue
             local cname
             cname=$(conf_field "$line" 1)
-            timeout 10 systemctl stop "mtg-${cname}" 2>/dev/null || true
-            timeout 10 systemctl disable "mtg-${cname}" 2>/dev/null || true
+            kill_service "mtg-${cname}"
+            systemctl disable "mtg-${cname}" 2>/dev/null || true
             rm -f "/etc/systemd/system/mtg-${cname}.service" "$MTG_DIR/${cname}.toml"
         done < "$CLIENTS_CONF"
     fi
@@ -613,7 +622,8 @@ switch_mode() {
                 csecret=$(conf_field "$line" 2)
                 cport=$(conf_field "$line" 3)
                 write_toml "$cname" "$csecret" "$cport"
-                timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+                kill_service "mtg-${cname}"
+                systemctl start "mtg-${cname}" 2>/dev/null || true
             done < "$CLIENTS_CONF"
         fi
 
@@ -710,7 +720,8 @@ if [[ $# -ge 2 && "$1" == "set-eu" ]]; then
             csecret=$(conf_field "$line" 2)
             cport=$(conf_field "$line" 3)
             write_toml "$cname" "$csecret" "$cport"
-            timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+            kill_service "mtg-${cname}"
+            systemctl start "mtg-${cname}" 2>/dev/null || true
         done < "$CLIENTS_CONF"
     fi
 
