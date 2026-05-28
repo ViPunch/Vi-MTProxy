@@ -323,8 +323,7 @@ delete_client() {
 
 manage_clients() {
     while true; do
-        tput cup 0 0 2>/dev/null
-        tput ed 2>/dev/null
+        tput sc 2>/dev/null
         echo "=== Управление клиентами ==="
         echo "1) Список клиентов"
         echo "2) Добавить клиента"
@@ -337,8 +336,10 @@ manage_clients() {
             2) add_client; read -rp "Нажмите Enter..." ;;
             3) delete_client; read -rp "Нажмите Enter..." ;;
             0) return ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
+        tput rc 2>/dev/null
+        tput ed 2>/dev/null
     done
 }
 
@@ -510,8 +511,7 @@ manage_menu() {
     while true; do
         local mode
         mode=$(read_mode)
-        tput cup 0 0 2>/dev/null
-        tput ed 2>/dev/null
+        tput sc 2>/dev/null
         echo "=== Управление ==="
         echo "1) Перезапустить все сервисы"
         echo "2) Обновить mtg"
@@ -541,8 +541,10 @@ manage_menu() {
             5) [[ "$mode" == "cascade" ]] && unbind_eu_server || echo "Неверный выбор."; read -rp "Нажмите Enter..." ;;
             6) [[ "$mode" == "cascade" ]] && remove_all || echo "Неверный выбор." ;;
             0) return ;;
-            *) echo "Неверный выбор." ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
+        tput rc 2>/dev/null
+        tput ed 2>/dev/null
     done
 }
 
@@ -649,9 +651,6 @@ switch_mode() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
-    tput smcup 2>/dev/null || true
-    trap 'tput rmcup 2>/dev/null || true' EXIT
-
     while true; do
         local mode
         mode=$(read_mode)
@@ -665,8 +664,7 @@ main_menu() {
             mode_label="одиночный"
         fi
 
-        tput cup 0 0 2>/dev/null
-        tput ed 2>/dev/null
+        tput sc 2>/dev/null
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
         echo "---"
@@ -684,9 +682,11 @@ main_menu() {
             3) show_status; read -rp "Нажмите Enter..." ;;
             4) manage_menu ;;
             5) switch_mode; read -rp "Нажмите Enter..." ;;
-            0) tput rmcup 2>/dev/null || true; exit 0 ;;
+            0) exit 0 ;;
             *) echo "Неверный выбор."; sleep 1 ;;
         esac
+        tput rc 2>/dev/null
+        tput ed 2>/dev/null
     done
 }
 

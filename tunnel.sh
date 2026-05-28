@@ -378,12 +378,8 @@ delete_all() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
-    tput smcup 2>/dev/null || true
-    trap 'tput rmcup 2>/dev/null || true' EXIT
-
     while true; do
-        tput cup 0 0 2>/dev/null
-        tput ed 2>/dev/null
+        tput sc 2>/dev/null
         echo "=== MTProxy Tunnel (EU) ==="
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
@@ -395,9 +391,11 @@ main_menu() {
             1) create_tunnel; read -rp "Нажмите Enter..." ;;
             2) tunnel_status; read -rp "Нажмите Enter..." ;;
             3) delete_tunnel ;;
-            0) tput rmcup 2>/dev/null || true; exit 0 ;;
+            0) exit 0 ;;
             *) echo "Неверный выбор."; sleep 1 ;;
         esac
+        tput rc 2>/dev/null
+        tput ed 2>/dev/null
     done
 }
 
