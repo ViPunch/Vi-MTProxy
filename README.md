@@ -13,7 +13,7 @@
 ### RU-сервер (основной)
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/vladimirpuchnin/vi-mtpro-cascade/master/setup.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/setup.sh)
 ```
 
 При первом запуске выберите режим — одиночный или каскад. Скрипт установит mtg, создаст первого клиента и выдаст ссылку для Telegram.
@@ -23,7 +23,7 @@ bash <(curl -sSL https://raw.githubusercontent.com/vladimirpuchnin/vi-mtpro-casc
 ### EU-сервер (только для режима каскада)
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/vladimirpuchnin/vi-mtpro-cascade/master/tunnel.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/tunnel.sh)
 ```
 
 Скрипт установит WARP и gost, поднимет SOCKS5-туннель на порту 1080. После этого вернитесь на RU-сервер — каскад заработает.
