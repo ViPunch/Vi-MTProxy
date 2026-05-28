@@ -16,7 +16,9 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 step() { echo ""; echo "=== $* ==="; log "Шаг: $*"; }
 
 check_root() {
-    [[ "$EUID" -ne 0 ]] && die "Запустите скрипт от root: sudo bash $0"
+    if [[ "$(id -u)" -ne 0 ]]; then
+        die "Запустите скрипт от root: sudo bash $0"
+    fi
 }
 
 check_os() {
