@@ -235,7 +235,7 @@ add_client() {
         local i=1
         for sni in "${SNI_LIST[@]}"; do
             printf " %2d) %-30s" "$i" "$sni"
-            (( i % 2 == 0 )) && echo "" || true
+            if (( i % 2 == 0 )); then echo ""; fi
             (( i++ ))
         done
         echo ""
@@ -262,14 +262,13 @@ add_client() {
     echo "Генерирую секрет..."
     local secret
     if [[ "$secret_type" == "2" && -n "$sni_domain" ]]; then
-        # Secured secret с TLS
         secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>&1) \
             || die "Ошибка генерации секрета: $secret"
     else
-        # Simple secret: 32 hex символа (16 байт)
         secret=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
         sni_domain="none"
     fi
+    echo "Секрет: $secret"
 
     # Сохранение
     mkdir -p "$MTG_DIR"
