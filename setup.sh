@@ -220,37 +220,55 @@ add_client() {
 
     # SNI
     echo ""
-    echo "Выберите SNI-домен:"
-    local i=1
-    for sni in "${SNI_LIST[@]}"; do
-        printf " %2d) %-30s" "$i" "$sni"
-        (( i % 2 == 0 )) && echo "" || true
-        (( i++ ))
-    done
+    echo "Выберите тип секрета:"
+    echo "1) Simple (совместимый со всеми клиентами)"
+    echo "2) Secured с TLS (может не работать на старых клиентах)"
     echo ""
-    echo " 21) Ввести вручную"
-    echo ""
+    local secret_type
+    read -rp "Ваш выбор [1-2, по умолчанию: 1]: " secret_type
+    secret_type="${secret_type:-1}"
 
-    local sni_choice sni_domain
-    read -rp "Ваш выбор [1-21]: " sni_choice
-    if [[ "$sni_choice" == "21" ]]; then
-        read -rp "Введите домен: " sni_domain
-        if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
-            echo "Некорректный домен."
+    local sni_domain=""
+    if [[ "$secret_type" == "2" ]]; then
+        echo ""
+        echo "Выберите SNI-домен:"
+        local i=1
+        for sni in "${SNI_LIST[@]}"; do
+            printf " %2d) %-30s" "$i" "$sni"
+            (( i % 2 == 0 )) && echo "" || true
+            (( i++ ))
+        done
+        echo ""
+        echo " 21) Ввести вручную"
+        echo ""
+
+        local sni_choice
+        read -rp "Ваш выбор [1-21]: " sni_choice
+        if [[ "$sni_choice" == "21" ]]; then
+            read -rp "Введите домен: " sni_domain
+            if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
+                echo "Некорректный домен."
+                return 1
+            fi
+        elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
+            sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
+        else
+            echo "Некорректный выбор."
             return 1
         fi
-    elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
-        sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
-    else
-        echo "Некорректный выбор."
-        return 1
     fi
 
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null) \
-        || die "Ошибка генерации секрета. Проверьте: mtg generate-secret $sni_domain"
+    if [[ "$secret_type" == "2" && -n "$sni_domain" ]]; then
+        secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null) \
+            || die "Ошибка генерации секрета. Проверьте: mtg generate-secret $sni_domain"
+    else
+        # Simple secret: 32 hex символа (16 байт)
+        secret=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
+        sni_domain="none"
+    fi
 
     # Сохранение
     mkdir -p "$MTG_DIR"
