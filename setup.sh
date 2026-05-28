@@ -406,9 +406,6 @@ bind_eu_server() {
 }
 
 unbind_eu_server() {
-    # Временно переключаемся в single для write_toml, потом возвращаем cascade
-    local saved_mode
-    saved_mode=$(read_mode)
     echo "single" > "$MODE_FILE"
 
     while IFS= read -r line; do
@@ -418,12 +415,11 @@ unbind_eu_server() {
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         write_toml "$cname" "$csecret" "$cport"
-        systemctl restart "mtg-${cname}"
+        systemctl restart "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
-    echo "$saved_mode" > "$MODE_FILE"
     rm -f "$EU_IP_FILE"
-    echo "EU-сервер отвязан. Трафик идёт напрямую."
+    echo "EU-сервер отвязан. Режим: одиночный. Трафик идёт напрямую."
 }
 
 remove_all() {
@@ -451,9 +447,9 @@ remove_all() {
 }
 
 manage_menu() {
-    local mode
-    mode=$(read_mode)
     while true; do
+        local mode
+        mode=$(read_mode)
         echo ""
         echo "=== Управление ==="
         echo "1) Перезапустить все сервисы"
