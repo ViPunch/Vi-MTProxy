@@ -379,7 +379,7 @@ delete_all() {
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
     while true; do
-        tput sc 2>/dev/null
+        echo ""
         echo "=== MTProxy Tunnel (EU) ==="
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
@@ -388,14 +388,12 @@ main_menu() {
         echo ""
         read -rp "Выбор: " choice
         case "$choice" in
-            1) create_tunnel; read -rp "Нажмите Enter..." ;;
-            2) tunnel_status; read -rp "Нажмите Enter..." ;;
+            1) create_tunnel ;;
+            2) tunnel_status ;;
             3) delete_tunnel ;;
             0) exit 0 ;;
-            *) echo "Неверный выбор."; sleep 1 ;;
+            *) echo "Неверный выбор." ;;
         esac
-        tput rc 2>/dev/null
-        tput ed 2>/dev/null
     done
 }
 
