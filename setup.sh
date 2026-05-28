@@ -170,6 +170,10 @@ add_client() {
         echo "Имя не должно содержать пробелы или двоеточие."
         return 1
     fi
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Имя должно содержать только латинские буквы, цифры, дефис и подчеркивание."
+        return 1
+    fi
     if client_exists "$name"; then
         echo "Клиент '$name' уже существует."
         return 1
