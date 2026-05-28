@@ -355,12 +355,12 @@ delete_tunnel() {
     exit 0
 }
 
-# ─── Удалить всё (включая WARP) ──────────────────────────────────────────────
+# ─── Удалить всё ─────────────────────────────────────────────────────────────
 delete_all() {
-    read -rp "Удалить всё (gost + WARP)? Это действие необратимо. [y/N]: " confirm
+    read -rp "Удалить gost? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
-    step "Удаление всего"
+    step "Удаление gost"
 
     systemctl stop gost-tunnel 2>/dev/null || true
     systemctl disable gost-tunnel 2>/dev/null || true
@@ -368,19 +368,11 @@ delete_all() {
     rm -f "$GOST_BIN"
     ufw delete allow 1080/tcp > /dev/null 2>&1 || true
 
-    echo "Отключаю и удаляю WARP..."
-    warp-cli disconnect 2>/dev/null || true
-    warp-cli registration delete 2>/dev/null || true
-    apt-get remove -y cloudflare-warp 2>/dev/null || true
-    apt-get autoremove -y 2>/dev/null || true
-    rm -f /etc/apt/sources.list.d/cloudflare-client.list
-    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-
     rm -f "$LOG_FILE"
 
     systemctl daemon-reload
-    echo "Всё удалено (включая WARP)."
-    log "Всё удалено"
+    echo "gost удалён. WARP оставлен на месте."
+    log "gost удалён"
     exit 0
 }
 
@@ -393,7 +385,6 @@ main_menu() {
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
         echo "3) Удалить туннель (только gost)"
-        echo "4) Удалить всё (gost + WARP)"
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
@@ -402,7 +393,6 @@ main_menu() {
             1) create_tunnel ;;
             2) tunnel_status ;;
             3) delete_tunnel ;;
-            4) delete_all ;;
             0) exit 0 ;;
             *) echo "Неверный выбор." ;;
         esac
