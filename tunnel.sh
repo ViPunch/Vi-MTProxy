@@ -60,19 +60,47 @@ create_tunnel() {
 
     echo "Устанавливаю зависимости..."
     apt-get update -qq
-    apt-get install -y curl wget ufw
+    apt-get install -y curl wget ufw gnupg lsb-release
 
     echo "Устанавливаю WARP..."
-    bash <(curl -sSL https://gist.githubusercontent.com/hamid-gh98/dc5dd9b0cc5b0412af927b1ccdb294c7/raw/install_warp_proxy.sh) -y \
-        || die "Ошибка установки WARP"
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+        | tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
+    apt-get update -qq
+    apt-get install -y cloudflare-warp
+
+    echo "Инициализирую WARP..."
+    warp-cli registration new
+    warp-cli mode proxy
+    warp-cli connect
 
     echo "Проверяю WARP..."
-    local warp_ip
-    warp_ip=$(curl -s --max-time 10 --socks5 "$WARP_SOCKS" https://api.ipify.org 2>/dev/null || echo "")
-    if [[ -z "$warp_ip" ]]; then
-        die "WARP не работает: не удалось получить IP через socks5://$WARP_SOCKS"
+    local attempts=0
+    while (( attempts < 10 )); do
+        if warp-cli status 2>/dev/null | grep -q "Connected"; then
+            break
+        fi
+        sleep 2
+        (( attempts++ ))
+    done
+    if ! warp-cli status 2>/dev/null | grep -q "Connected"; then
+        die "WARP не подключился. Проверьте: warp-cli status"
     fi
-    echo "WARP работает. Внешний IP через WARP: $warp_ip"
+
+    echo "Проверяю порт 40000..."
+    local port_attempts=0
+    while (( port_attempts < 10 )); do
+        if ss -lntp 2>/dev/null | grep -q "127.0.0.1:40000"; then
+            break
+        fi
+        sleep 2
+        (( port_attempts++ ))
+    done
+    if ! ss -lntp 2>/dev/null | grep -q "127.0.0.1:40000"; then
+        die "WARP proxy не слушает на 127.0.0.1:40000"
+    fi
+    echo "WARP работает на 127.0.0.1:40000"
 
     install_gost_binary
 
@@ -82,8 +110,7 @@ create_tunnel() {
     cat > "$GOST_SERVICE" <<EOF
 [Unit]
 Description=Gost SOCKS5 Tunnel (→ WARP)
-After=network.target warp-proxy.service
-Wants=warp-proxy.service
+After=network.target
 
 [Service]
 ExecStart=$GOST_BIN -L=socks5://:1080 -F=socks5://$WARP_SOCKS
@@ -110,8 +137,8 @@ EOF
 # ─── Статус туннеля ───────────────────────────────────────────────────────────
 tunnel_status() {
     echo ""
-    echo "--- warp-proxy ---"
-    systemctl status warp-proxy --no-pager -l 2>/dev/null || echo "Сервис не найден."
+    echo "--- WARP ---"
+    warp-cli status 2>/dev/null || echo "warp-cli не найден."
     echo ""
     echo "--- gost-tunnel ---"
     systemctl status gost-tunnel --no-pager -l 2>/dev/null || echo "Сервис не найден."
@@ -122,19 +149,46 @@ delete_tunnel() {
     read -rp "Удалить туннель? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
-    systemctl stop gost-tunnel warp-proxy 2>/dev/null || true
-    systemctl disable gost-tunnel warp-proxy 2>/dev/null || true
+    systemctl stop gost-tunnel 2>/dev/null || true
+    systemctl disable gost-tunnel 2>/dev/null || true
     rm -f "$GOST_SERVICE"
     rm -f "$GOST_BIN"
     ufw delete allow 1080/tcp > /dev/null 2>&1 || true
 
-    # Удаление WARP
-    if command -v warp &>/dev/null; then
-        warp u 2>/dev/null || true
-    fi
+    echo "Отключаю WARP..."
+    warp-cli disconnect 2>/dev/null || true
+    warp-cli registration delete 2>/dev/null || true
+    apt-get remove -y cloudflare-warp 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
     systemctl daemon-reload
     echo "Туннель удалён."
+    exit 0
+}
+
+# ─── Удалить всё ─────────────────────────────────────────────────────────────
+delete_all() {
+    read -rp "Удалить всё (gost + WARP + пакеты)? Это действие необратимо. [y/N]: " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
+
+    systemctl stop gost-tunnel 2>/dev/null || true
+    systemctl disable gost-tunnel 2>/dev/null || true
+    rm -f "$GOST_SERVICE"
+    rm -f "$GOST_BIN"
+    ufw delete allow 1080/tcp > /dev/null 2>&1 || true
+
+    echo "Отключаю и удаляю WARP..."
+    warp-cli disconnect 2>/dev/null || true
+    warp-cli registration delete 2>/dev/null || true
+    apt-get remove -y cloudflare-warp 2>/dev/null || true
+    apt-get autoremove -y 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
+    systemctl daemon-reload
+    echo "Всё удалено."
+    exit 0
 }
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
@@ -145,6 +199,7 @@ main_menu() {
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
         echo "3) Удалить туннель"
+        echo "4) Удалить всё (gost + WARP + пакеты)"
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
@@ -152,6 +207,7 @@ main_menu() {
             1) create_tunnel ;;
             2) tunnel_status ;;
             3) delete_tunnel ;;
+            4) delete_all ;;
             0) exit 0 ;;
             *) echo "Неверный выбор." ;;
         esac
