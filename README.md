@@ -1,16 +1,16 @@
-# Vi-MTPro Cascade
+# Vi-MTPro (Cascade + WARP)
 
 Быстрая установка MTProxy с поддержкой каскада через WARP.
 
 Два режима работы:
 - **Одиночный** — один VPS, mtg подключается к Telegram напрямую
-- **Каскад** — RU-сервер → EU-сервер → WARP → Telegram (обход блокировок)
+- **Каскад** — Первый-сервер → Второй-сервер → WARP → Telegram (обход блокировок)
 
 ---
 
 ## Быстрый старт
 
-### RU-сервер (основной)
+### Первый-сервер (основной)
 
 ```bash
 bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/setup.sh)
@@ -26,13 +26,13 @@ vi-mtpro
 
 ---
 
-### EU-сервер (только для режима каскада)
+### Второй-сервер (только для режима каскада)
 
 ```bash
 bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/tunnel.sh)
 ```
 
-Скрипт установит WARP и gost, поднимет SOCKS5-туннель на порту 1080. После этого вернитесь на RU-сервер — каскад заработает.
+Скрипт установит WARP и gost, поднимет SOCKS5-туннель на порту 1080. После этого вернитесь на Первый-сервер — каскад заработает.
 
 ---
 
@@ -56,5 +56,4 @@ bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/tun
 
 - Ubuntu 24.04
 - Root-доступ
-- Открытый порт 443 (или любой другой по выбору) на RU-сервере
-- Открытый порт 1080 на EU-сервере (только для каскада)
+
