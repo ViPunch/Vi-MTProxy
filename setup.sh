@@ -179,11 +179,14 @@ add_client() {
         name="$default_name"
     fi
 
+    # Убираем \r на случай Windows-переносов
+    name=$(echo "$name" | tr -d '\r')
+
     if [[ "$name" =~ [[:space:]:] ]]; then
         echo "Имя не должно содержать пробелы или двоеточие."
         return 1
     fi
-    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    if ! echo "$name" | grep -qP '^[a-zA-Z0-9_-]+$'; then
         echo "Имя должно содержать только латинские буквы, цифры, дефис и подчеркивание."
         return 1
     fi
