@@ -547,21 +547,68 @@ setup_cascade() {
     echo "============================================================"
 }
 
-# ─── Главное меню ─────────────────────────────────────────────────────────────
-main_menu() {
+# ─── Смена режима ────────────────────────────────────────────────────────────
+switch_mode() {
     local mode
     mode=$(read_mode)
-    local eu_ip
-    eu_ip=$(read_eu_ip)
 
-    local mode_label
+    echo ""
     if [[ "$mode" == "cascade" ]]; then
-        mode_label="каскад (EU: ${eu_ip:-не задан})"
+        echo "Текущий режим: каскад"
+        echo "1) Переключить на одиночный"
+        echo "0) Отмена"
     else
-        mode_label="одиночный"
+        echo "Текущий режим: одиночный"
+        echo "1) Переключить на каскад"
+        echo "0) Отмена"
     fi
+    echo ""
+    read -rp "Выбор: " choice
+    [[ "$choice" != "1" ]] && return
 
+    if [[ "$mode" == "cascade" ]]; then
+        unbind_eu_server
+    else
+        echo "cascade" > "$MODE_FILE"
+        local eu_ip
+        read -rp "Введите IP EU-сервера: " eu_ip
+        [[ -z "$eu_ip" ]] && { echo "IP не может быть пустым."; echo "single" > "$MODE_FILE"; return 1; }
+        echo "$eu_ip" > "$EU_IP_FILE"
+
+        # Перезаписываем toml для всех клиентов
+        if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                local cname csecret cport
+                cname=$(conf_field "$line" 1)
+                csecret=$(conf_field "$line" 2)
+                cport=$(conf_field "$line" 3)
+                write_toml "$cname" "$csecret" "$cport"
+                timeout 10 systemctl restart "mtg-${cname}" 2>/dev/null || true
+            done < "$CLIENTS_CONF"
+        fi
+
+        echo ""
+        echo "Режим изменён на каскад. EU-сервер: $eu_ip"
+        echo "Не забудьте запустить tunnel.sh на EU-сервере!"
+    fi
+}
+
+# ─── Главное меню ─────────────────────────────────────────────────────────────
+main_menu() {
     while true; do
+        local mode
+        mode=$(read_mode)
+        local eu_ip
+        eu_ip=$(read_eu_ip)
+
+        local mode_label
+        if [[ "$mode" == "cascade" ]]; then
+            mode_label="каскад (EU: ${eu_ip:-не задан})"
+        else
+            mode_label="одиночный"
+        fi
+
         echo ""
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
@@ -570,6 +617,7 @@ main_menu() {
         echo "2) Показать ссылки клиентов"
         echo "3) Статус сервисов"
         echo "4) Управление (рестарт / удаление / обновление)"
+        echo "5) Сменить режим (одиночный / каскад)"
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
@@ -578,6 +626,7 @@ main_menu() {
             2) show_links ;;
             3) show_status ;;
             4) manage_menu ;;
+            5) switch_mode ;;
             0) exit 0 ;;
             *) echo "Неверный выбор." ;;
         esac
