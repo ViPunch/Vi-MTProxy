@@ -378,9 +378,8 @@ delete_all() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
-    echo "=== Главное меню ==="
     while true; do
-        echo ""
+        clear
         echo "=== MTProxy Tunnel (EU) ==="
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
@@ -388,10 +387,9 @@ main_menu() {
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
-        echo "Выбрано: $choice"
         case "$choice" in
-            1) create_tunnel ;;
-            2) tunnel_status ;;
+            1) create_tunnel; read -rp "Нажмите Enter..." ;;
+            2) tunnel_status; read -rp "Нажмите Enter..." ;;
             3) delete_tunnel ;;
             0) exit 0 ;;
             *) echo "Неверный выбор." ;;
