@@ -261,9 +261,15 @@ add_client() {
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    if [[ "$secret_type" == "2" && -n "$sni_domain" ]]; then
-        secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null) \
-            || die "Ошибка генерации секрета. Проверьте: mtg generate-secret $sni_domain"
+    # Проверяем версию mtg
+    local mtg_ver
+    mtg_ver=$("$MTG_BIN" --version 2>&1 | head -1)
+    echo "Версия mtg: $mtg_ver"
+
+    # Генерируем секрет через mtg
+    secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>&1) \
+        || die "Ошибка генерации секрета: $secret"
+    echo "Секрет: $secret"
     else
         # Simple secret: 32 hex символа (16 байт)
         secret=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
