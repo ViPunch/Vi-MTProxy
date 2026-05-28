@@ -10,6 +10,7 @@ LOG_FILE="/var/log/tunnel-setup.log"
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+step() { echo ""; echo "=== $* ==="; log "Шаг: $*"; }
 
 check_root() {
     [[ "$EUID" -ne 0 ]] && die "Запустите скрипт от root: sudo bash $0"
@@ -26,21 +27,21 @@ check_os() {
     log "ОС: $PRETTY_NAME"
 }
 
-check_command() {
-    command -v "$1" &>/dev/null || die "Команда '$1' не найдена. Установите: apt-get install $2"
-}
-
 # ─── Установка зависимостей ──────────────────────────────────────────────────
 install_dependencies() {
-    log "Устанавливаю зависимости..."
+    step "Установка зависимостей"
     apt-get update -qq
     apt-get install -y curl wget ufw gnupg lsb-release jq
+    log "Зависимости установлены"
 }
 
 # ─── Установка gost ───────────────────────────────────────────────────────────
 install_gost_binary() {
+    step "Проверка gost"
+
     if [[ -x "$GOST_BIN" ]]; then
         log "gost уже установлен: $("$GOST_BIN" -V 2>&1 | head -1)"
+        echo "gost уже установлен"
         return 0
     fi
 
@@ -52,8 +53,10 @@ install_gost_binary() {
         aarch64) arch="arm64" ;;
         *) die "Неподдерживаемая архитектура: $arch" ;;
     esac
+    echo "Архитектура: $arch"
 
     local api_url="https://api.github.com/repos/ginuerzh/gost/releases/latest"
+    echo "Получаю информацию о релизе gost..."
     local release_json
     release_json=$(curl -sSf "$api_url") || die "Не удалось получить информацию о релизе gost"
 
@@ -61,7 +64,6 @@ install_gost_binary() {
     download_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("linux.*'"$arch"'.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
 
     if [[ -z "$download_url" || "$download_url" == "null" ]]; then
-        # Fallback: парсинг через grep если jq не сработал
         download_url=$(echo "$release_json" \
             | grep -o '"browser_download_url": *"[^"]*"' \
             | grep -o 'https://[^"]*' \
@@ -72,6 +74,7 @@ install_gost_binary() {
     fi
 
     [[ -z "$download_url" ]] && die "Не найден подходящий релиз gost для linux/$arch"
+    echo "Скачиваю: $download_url"
 
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -86,87 +89,107 @@ install_gost_binary() {
 
     cp "$bin" "$GOST_BIN"
     chmod +x "$GOST_BIN"
-    log "gost установлен: $("$GOST_BIN" -V 2>&1 | head -1)"
+    echo "gost установлен: $("$GOST_BIN" -V 2>&1 | head -1)"
+    log "gost установлен"
 }
 
 # ─── Установка WARP ──────────────────────────────────────────────────────────
 install_warp() {
+    step "Проверка WARP"
+
     if command -v warp-cli &>/dev/null; then
+        echo "WARP уже установлен"
         log "WARP уже установлен"
         return 0
     fi
 
     log "Устанавливаю WARP..."
+    echo "Устанавливаю Cloudflare WARP..."
 
-    # Проверяем наличие cloudflare-warp пакета
-    if apt-cache show cloudflare-warp &>/dev/null; then
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-            | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
-            | tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
-        apt-get update -qq
-        apt-get install -y cloudflare-warp
-    else
-        die "Пакет cloudflare-warp не доступен для вашего дистрибутива. Проверьте: https://pkg.cloudflareclient.com/"
-    fi
+    # Добавляем ключ и репозиторий
+    echo "Добавляю репозиторий Cloudflare..."
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+        | tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
+
+    echo "Обновляю списки пакетов..."
+    apt-get update -qq
+
+    echo "Устанавливаю cloudflare-warp..."
+    apt-get install -y cloudflare-warp || die "Ошибка установки cloudflare-warp"
+
+    echo "WARP установлен"
+    log "WARP установлен"
 }
 
 # ─── Настройка WARP ──────────────────────────────────────────────────────────
 configure_warp() {
-    log "Настраиваю WARP..."
+    step "Настройка WARP"
 
     # Проверяем текущий статус
     local current_status
-    current_status=$(warp-cli status 2>/dev/null | grep -oP 'Status: \K.*' || echo "Unknown")
+    current_status=$(warp-cli status 2>/dev/null || echo "Unknown")
+    echo "Текущий статус WARP: $current_status"
 
-    if [[ "$current_status" == "Connected" ]]; then
+    if echo "$current_status" | grep -q "Connected"; then
+        echo "WARP уже подключен"
         log "WARP уже подключен"
         return 0
     fi
 
-    # Регистрация если нужно
-    if ! warp-cli status 2>/dev/null | grep -q "Registered"; then
-        log "Регистрирую WARP..."
+    # Регистрация
+    if ! echo "$current_status" | grep -q "Registered"; then
+        echo "Регистрирую WARP..."
+        log "Регистрация WARP..."
         warp-cli registration new || die "Ошибка регистрации WARP"
+        echo "WARP зарегистрирован"
+    else
+        echo "WARP уже зарегистрирован"
     fi
 
     # Переключаем в proxy режим
-    log "Переключаю WARP в proxy режим..."
+    echo "Переключаю в proxy режим..."
     warp-cli mode proxy || die "Ошибка переключения WARP в proxy режим"
 
     # Подключаем
-    log "Подключаю WARP..."
+    echo "Подключаю WARP..."
     warp-cli connect || die "Ошибка подключения WARP"
 
     # Ждем подключения
-    log "Ожидаю подключения WARP..."
+    echo "Ожидаю подключения WARP (до 30 секунд)..."
     local attempts=0
     while (( attempts < 15 )); do
         if warp-cli status 2>/dev/null | grep -q "Connected"; then
+            echo "WARP подключен!"
             log "WARP подключен"
-            break
-        fi
-        sleep 2
-        (( attempts++ ))
-    done
-
-    if ! warp-cli status 2>/dev/null | grep -q "Connected"; then
-        die "WARP не подключился за 30 секунд. Проверьте: warp-cli status"
-    fi
-}
-
-# ─── Проверка порта WARP ─────────────────────────────────────────────────────
-check_warp_port() {
-    log "Проверяю порт 40000..."
-    local attempts=0
-    while (( attempts < 15 )); do
-        if ss -lntp 2>/dev/null | grep -q "127.0.0.1:40000"; then
-            log "WARP proxy слушает на 127.0.0.1:40000"
             return 0
         fi
         sleep 2
         (( attempts++ ))
+        echo "Попытка $attempts/15..."
     done
+
+    die "WARP не подключился за 30 секунд. Проверьте: warp-cli status"
+}
+
+# ─── Проверка порта WARP ─────────────────────────────────────────────────────
+check_warp_port() {
+    step "Проверка порта WARP"
+
+    echo "Проверяю порт 40000..."
+    local attempts=0
+    while (( attempts < 15 )); do
+        if ss -lntp 2>/dev/null | grep -q "127.0.0.1:40000"; then
+            echo "WARP proxy слушает на 127.0.0.1:40000"
+            log "Порт 40000 активен"
+            return 0
+        fi
+        sleep 2
+        (( attempts++ ))
+        echo "Попытка $attempts/15..."
+    done
+
     die "WARP proxy не слушает на 127.0.0.1:40000 через 30 секунд"
 }
 
@@ -177,6 +200,8 @@ create_tunnel() {
         return 0
     fi
 
+    step "Создание туннеля"
+
     check_os
     install_dependencies
     install_warp
@@ -184,11 +209,12 @@ create_tunnel() {
     check_warp_port
     install_gost_binary
 
-    log "Настраиваю firewall..."
+    step "Настройка firewall"
     ufw allow 1080/tcp > /dev/null 2>&1 || true
     ufw --force enable > /dev/null 2>&1 || true
+    echo "Порт 1080 открыт"
 
-    log "Создаю systemd сервис gost..."
+    step "Создание systemd сервиса"
     cat > "$GOST_SERVICE" <<EOF
 [Unit]
 Description=Gost SOCKS5 Tunnel (→ WARP)
@@ -205,18 +231,22 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now gost-tunnel
+    echo "Сервис gost-tunnel создан и запущен"
 
     # Проверяем что gost запустился
     sleep 2
     if ! systemctl is-active --quiet gost-tunnel; then
-        die "Сервис gost-tunnel не запустился. Проверьте: journalctl -u gost-tunnel"
+        echo "ОШИБКА: Сервис gost-tunnel не запустился"
+        echo "Логи: journalctl -u gost-tunnel -n 20"
+        journalctl -u gost-tunnel -n 20
+        die "Сервис gost-tunnel не запустился"
     fi
 
     log "Туннель создан и запущен"
 
     echo ""
     echo "============================================================"
-    echo "Туннель создан."
+    echo "Туннель создан!"
     echo "gost слушает SOCKS5 на порту 1080."
     echo "Трафик форвардится через WARP."
     echo ""
@@ -246,7 +276,7 @@ delete_tunnel() {
     read -rp "Удалить туннель? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
-    log "Удаляю туннель..."
+    step "Удаление туннеля"
 
     systemctl stop gost-tunnel 2>/dev/null || true
     systemctl disable gost-tunnel 2>/dev/null || true
@@ -262,7 +292,8 @@ delete_tunnel() {
     rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
     systemctl daemon-reload
-    log "Туннель удалён."
+    echo "Туннель удалён."
+    log "Туннель удалён"
     exit 0
 }
 
@@ -271,7 +302,7 @@ delete_all() {
     read -rp "Удалить всё (gost + WARP + пакеты)? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
-    log "Удаляю всё..."
+    step "Удаление всего"
 
     systemctl stop gost-tunnel 2>/dev/null || true
     systemctl disable gost-tunnel 2>/dev/null || true
@@ -287,8 +318,12 @@ delete_all() {
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
     rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
+    # Удаляем лог
+    rm -f "$LOG_FILE"
+
     systemctl daemon-reload
-    log "Всё удалено."
+    echo "Всё удалено."
+    log "Всё удалено"
     exit 0
 }
 
