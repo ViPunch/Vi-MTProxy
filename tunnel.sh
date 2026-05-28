@@ -274,17 +274,65 @@ EOF
 # ─── Статус туннеля ───────────────────────────────────────────────────────────
 tunnel_status() {
     echo ""
-    echo "--- WARP ---"
-    warp-cli status 2>/dev/null || echo "warp-cli не найден."
+    echo "=== ДИАГНОСТИКА EU-СЕРВЕРА ==="
     echo ""
-    echo "--- gost-tunnel ---"
-    systemctl status gost-tunnel --no-pager -l 2>/dev/null || echo "Сервис не найден."
-    echo ""
-    echo "--- Порт 1080 ---"
-    if ss -lntp 2>/dev/null | grep -q ":1080"; then
-        echo "SOCKS5 слушает на порту 1080"
+
+    echo "--- 1. WARP ---"
+    if command -v warp-cli &>/dev/null; then
+        warp-cli status 2>/dev/null || echo "WARP не настроен"
     else
-        echo "Порт 1080 не слушается"
+        echo "WARP НЕ УСТАНОВЛЕН"
+    fi
+    echo ""
+
+    echo "--- 2. gost-tunnel ---"
+    if systemctl is-active --quiet gost-tunnel 2>/dev/null; then
+        echo "Сервис gost-tunnel: РАБОТАЕТ"
+    else
+        echo "Сервис gost-tunnel: НЕ РАБОТАЕТ"
+        systemctl status gost-tunnel --no-pager -l 2>/dev/null || true
+    fi
+    echo ""
+
+    echo "--- 3. Порт 1080 (SOCKS5) ---"
+    if ss -lntp 2>/dev/null | grep -q ":1080"; then
+        echo "Порт 1080: СЛУШАЕТ"
+        ss -lntp | grep ":1080"
+    else
+        echo "Порт 1080: НЕ СЛУШАЕТ"
+    fi
+    echo ""
+
+    echo "--- 4. Порт 40000 (WARP proxy) ---"
+    if ss -lntp 2>/dev/null | grep -q "127.0.0.1:40000"; then
+        echo "WARP proxy (40000): РАБОТАЕТ"
+    else
+        echo "WARP proxy (40000): НЕ РАБОТАЕТ"
+    fi
+    echo ""
+
+    echo "--- 5. Тест SOCKS5 прокси ---"
+    if curl -s --max-time 10 --socks5 127.0.0.1:1080 https://api.ipify.org 2>/dev/null; then
+        echo ""
+        echo "SOCKS5 прокси РАБОТАЕТ"
+    else
+        echo "SOCKS5 прокси НЕ РАБОТАЕТ"
+    fi
+    echo ""
+
+    echo "--- 6. Внешний IP (через WARP) ---"
+    local direct_ip
+    direct_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "не удалось")
+    echo "Прямой IP: $direct_ip"
+    local warp_ip
+    warp_ip=$(curl -s --max-time 10 --socks5 127.0.0.1:1080 https://api.ipify.org 2>/dev/null || echo "не удалось")
+    echo "IP через WARP: $warp_ip"
+    echo ""
+
+    if [[ "$direct_ip" != "$warp_ip" && "$warp_ip" != "не удалось" ]]; then
+        echo "✓ WARP работает - IP отличается"
+    else
+        echo "✗ WARP возможно не работает"
     fi
 }
 
