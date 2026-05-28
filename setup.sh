@@ -362,6 +362,21 @@ show_status() {
 }
 
 # ─── Управление (рестарт / обновление / удаление) ────────────────────────────
+force_stop_all() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return 0
+    fi
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname
+        cname=$(conf_field "$line" 1)
+        timeout 5 systemctl kill "mtg-${cname}" 2>/dev/null || true
+        timeout 5 systemctl stop "mtg-${cname}" 2>/dev/null || true
+        echo "Остановлен: mtg-${cname}"
+    done < "$CLIENTS_CONF"
+}
+
 restart_all() {
     if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
         echo "Клиентов нет."
@@ -478,12 +493,13 @@ manage_menu() {
         echo "=== Управление ==="
         echo "1) Перезапустить все сервисы"
         echo "2) Обновить mtg"
+        echo "3) Принудительная остановка всех сервисов"
         if [[ "$mode" == "cascade" ]]; then
-            echo "3) Привязать EU-сервер"
-            echo "4) Отвязать EU-сервер"
-            echo "5) Удалить всё"
+            echo "4) Привязать EU-сервер"
+            echo "5) Отвязать EU-сервер"
+            echo "6) Удалить всё"
         else
-            echo "3) Удалить всё"
+            echo "4) Удалить всё"
         fi
         echo "0) Назад"
         echo ""
@@ -491,15 +507,16 @@ manage_menu() {
         case "$choice" in
             1) restart_all ;;
             2) update_mtg ;;
-            3)
+            3) force_stop_all ;;
+            4)
                 if [[ "$mode" == "cascade" ]]; then
                     bind_eu_server
                 else
                     remove_all
                 fi
                 ;;
-            4) [[ "$mode" == "cascade" ]] && unbind_eu_server || echo "Неверный выбор." ;;
-            5) [[ "$mode" == "cascade" ]] && remove_all || echo "Неверный выбор." ;;
+            5) [[ "$mode" == "cascade" ]] && unbind_eu_server || echo "Неверный выбор." ;;
+            6) [[ "$mode" == "cascade" ]] && remove_all || echo "Неверный выбор." ;;
             0) return ;;
             *) echo "Неверный выбор." ;;
         esac
