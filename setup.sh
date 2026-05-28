@@ -215,8 +215,19 @@ add_client() {
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    secret=$("$MTG_BIN" generate-secret --hex tls "$sni_domain") \
-        || die "Ошибка генерации секрета"
+    # mtg v2: generate-secret --hex <domain>
+    # mtg v1: generate-secret <domain> (без --hex, без tls)
+    local mtg_ver
+    mtg_ver=$("$MTG_BIN" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+    local major
+    major=$(echo "$mtg_ver" | cut -d. -f1)
+    if [[ "$major" -ge 2 ]]; then
+        secret=$("$MTG_BIN" generate-secret --hex "$sni_domain") \
+            || die "Ошибка генерации секрета"
+    else
+        secret=$("$MTG_BIN" generate-secret "$sni_domain") \
+            || die "Ошибка генерации секрета"
+    fi
 
     # Сохранение
     mkdir -p "$MTG_DIR"
