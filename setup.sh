@@ -319,7 +319,8 @@ delete_client() {
 
 manage_clients() {
     while true; do
-        clear
+        tput cup 0 0 2>/dev/null
+        tput ed 2>/dev/null
         echo "=== Управление клиентами ==="
         echo "1) Список клиентов"
         echo "2) Добавить клиента"
@@ -505,7 +506,8 @@ manage_menu() {
     while true; do
         local mode
         mode=$(read_mode)
-        clear
+        tput cup 0 0 2>/dev/null
+        tput ed 2>/dev/null
         echo "=== Управление ==="
         echo "1) Перезапустить все сервисы"
         echo "2) Обновить mtg"
@@ -643,6 +645,9 @@ switch_mode() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
+    tput smcup 2>/dev/null || true
+    trap 'tput rmcup 2>/dev/null || true' EXIT
+
     while true; do
         local mode
         mode=$(read_mode)
@@ -656,7 +661,8 @@ main_menu() {
             mode_label="одиночный"
         fi
 
-        clear
+        tput cup 0 0 2>/dev/null
+        tput ed 2>/dev/null
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
         echo "---"
@@ -674,8 +680,8 @@ main_menu() {
             3) show_status; read -rp "Нажмите Enter..." ;;
             4) manage_menu ;;
             5) switch_mode; read -rp "Нажмите Enter..." ;;
-            0) exit 0 ;;
-            *) echo "Неверный выбор." ;;
+            0) tput rmcup 2>/dev/null || true; exit 0 ;;
+            *) echo "Неверный выбор."; sleep 1 ;;
         esac
     done
 }
