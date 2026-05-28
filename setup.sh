@@ -363,20 +363,28 @@ show_status() {
 
 # ─── Управление (рестарт / обновление / удаление) ────────────────────────────
 restart_all() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return 0
+    fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        systemctl restart "mtg-${cname}" && echo "Перезапущен: mtg-${cname}"
+        timeout 10 systemctl restart "mtg-${cname}" && echo "Перезапущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
 update_mtg() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return 0
+    fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        systemctl stop "mtg-${cname}" 2>/dev/null || true
+        timeout 10 systemctl stop "mtg-${cname}" 2>/dev/null || true
     done < "$CLIENTS_CONF"
 
     install_mtg_binary
@@ -385,7 +393,7 @@ update_mtg() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}"
+        timeout 10 systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
