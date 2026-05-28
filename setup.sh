@@ -221,11 +221,15 @@ add_client() {
     mtg_ver=$("$MTG_BIN" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
     local major
     major=$(echo "$mtg_ver" | cut -d. -f1)
+
+    # Добавляем случайный суффикс для уникальности секретов
+    local unique_domain="${sni_domain}.$(head -c 8 /dev/urandom | xxd -p).fake"
+
     if [[ "$major" -ge 2 ]]; then
-        secret=$("$MTG_BIN" generate-secret --hex "$sni_domain") \
+        secret=$("$MTG_BIN" generate-secret --hex "$unique_domain") \
             || die "Ошибка генерации секрета"
     else
-        secret=$("$MTG_BIN" generate-secret "$sni_domain") \
+        secret=$("$MTG_BIN" generate-secret "$unique_domain") \
             || die "Ошибка генерации секрета"
     fi
 
