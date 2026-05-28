@@ -449,9 +449,12 @@ remove_all() {
     fi
 
     rm -f "$MTG_BIN"
+    rm -f /usr/local/bin/vi-mtpro
+    rm -f /usr/local/lib/vi-mtpro.sh
     rm -rf "$MTG_DIR"
     systemctl daemon-reload
     echo "Удалено."
+    exit 0
 }
 
 manage_menu() {
@@ -508,6 +511,7 @@ setup_single() {
 
     echo ""
     echo "Установка завершена. Режим: одиночный."
+    echo "Для управления используйте команду: vi-mtpro"
 }
 
 setup_cascade() {
@@ -532,13 +536,13 @@ setup_cascade() {
 
     echo ""
     echo "============================================================"
-    echo "Шаг 2: настройте второй сервер (EU)."
     echo ""
     echo "Скопируйте tunnel.sh на EU-сервер и запустите:"
     echo "  bash tunnel.sh"
     echo ""
     echo "Скрипт настроит gost + WARP на EU-сервере."
     echo "После завершения каскад будет работать."
+    echo "Для управления используйте команду: vi-mtpro"
     echo "============================================================"
 }
 
@@ -581,6 +585,20 @@ main_menu() {
 
 # ─── Точка входа ──────────────────────────────────────────────────────────────
 [[ "$EUID" -ne 0 ]] && die "Запустите скрипт от root: sudo bash $0"
+
+# При первом запуске через curl сохраняем скрипт и регистрируем команду vi-mtpro
+SELF="/usr/local/lib/vi-mtpro.sh"
+if [[ ! -f "$SELF" ]]; then
+    SCRIPT_URL="https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/setup.sh"
+    curl -sSfL "$SCRIPT_URL" -o "$SELF" 2>/dev/null && chmod +x "$SELF" || cp "$0" "$SELF" 2>/dev/null || true
+fi
+if [[ -f "$SELF" ]]; then
+    cat > /usr/local/bin/vi-mtpro <<'EOF'
+#!/usr/bin/env bash
+exec bash /usr/local/lib/vi-mtpro.sh "$@"
+EOF
+    chmod +x /usr/local/bin/vi-mtpro
+fi
 
 if [[ ! -f "$MODE_FILE" ]]; then
     echo ""
