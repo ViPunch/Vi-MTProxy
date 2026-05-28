@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "=== Скрипт запущен ==="
+echo "Версия: 2.1 (debug)"
+
 # ─── Константы ────────────────────────────────────────────────────────────────
 GOST_BIN="/usr/local/bin/gost"
 GOST_SERVICE="/etc/systemd/system/gost-tunnel.service"
@@ -329,6 +332,7 @@ delete_all() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
+    echo "=== Главное меню ==="
     while true; do
         echo ""
         echo "=== MTProxy Tunnel (EU) ==="
@@ -339,6 +343,7 @@ main_menu() {
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
+        echo "Выбрано: $choice"
         case "$choice" in
             1) create_tunnel ;;
             2) tunnel_status ;;
