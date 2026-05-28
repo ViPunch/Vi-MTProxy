@@ -36,8 +36,14 @@ die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
 kill_service() {
     local svc="$1"
-    systemctl kill "$svc" 2>/dev/null || true
-    sleep 1
+    # Находим PID и убиваем напрямую
+    local pid
+    pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
+    if [[ -n "$pid" && "$pid" != "0" ]]; then
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 0.5
+    fi
+    systemctl reset-failed "$svc" 2>/dev/null || true
     systemctl stop "$svc" 2>/dev/null || true
 }
 
@@ -304,7 +310,6 @@ delete_client() {
     mv "$tmpfile" "$CLIENTS_CONF"
 
     ufw delete allow "${port}/tcp" > /dev/null 2>&1 || true
-    systemctl daemon-reload
 
     echo "Клиент '$name' удалён."
 }
@@ -489,7 +494,6 @@ remove_all() {
     rm -f /usr/local/bin/vi-mtpro
     rm -f /usr/local/lib/vi-mtpro.sh
     rm -rf "$MTG_DIR"
-    systemctl daemon-reload
     echo "Удалено."
     exit 0
 }
