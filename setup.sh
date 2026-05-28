@@ -219,33 +219,8 @@ add_client() {
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    # mtg v2: generate-secret --hex <domain>
-    # mtg v1: generate-secret <domain> (без --hex, без tls)
-    local mtg_ver
-    mtg_ver=$("$MTG_BIN" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
-    local major
-    major=$(echo "$mtg_ver" | cut -d. -f1)
-
-    # Генерируем уникальный секрет: первый - через mtg, остальные - случайные
-    local clients_count=0
-    if [[ -f "$CLIENTS_CONF" ]]; then
-        clients_count=$(wc -l < "$CLIENTS_CONF" | tr -d ' ')
-    fi
-
-    if [[ "$clients_count" -eq 0 ]]; then
-        # Первый клиент - используем mtg generate-secret
-        if [[ "$major" -ge 2 ]]; then
-            secret=$("$MTG_BIN" generate-secret --hex "$sni_domain") \
-                || die "Ошибка генерации секрета"
-        else
-            secret=$("$MTG_BIN" generate-secret "$sni_domain") \
-                || die "Ошибка генерации секрета"
-        fi
-    else
-        # Последующие клиенты - генерируем случайный секрет
-        # mtg v2 требует 32 байта (64 hex символа) с префиксом "ee"
-        secret="ee$(head -c 31 /dev/urandom | xxd -p | tr -d '\n')"
-    fi
+    # mtg v2: секрет 32 байта с префиксом "ee" (64 hex символа)
+    secret="ee$(head -c 31 /dev/urandom | xxd -p | tr -d '\n')"
 
     # Сохранение
     mkdir -p "$MTG_DIR"
