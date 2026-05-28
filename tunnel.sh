@@ -349,22 +349,15 @@ delete_tunnel() {
     rm -f "$GOST_BIN"
     ufw delete allow 1080/tcp > /dev/null 2>&1 || true
 
-    echo "Отключаю WARP..."
-    warp-cli disconnect 2>/dev/null || true
-    warp-cli registration delete 2>/dev/null || true
-    apt-get remove -y cloudflare-warp 2>/dev/null || true
-    rm -f /etc/apt/sources.list.d/cloudflare-client.list
-    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-
     systemctl daemon-reload
-    echo "Туннель удалён."
+    echo "Туннель удалён. WARP оставлен на месте."
     log "Туннель удалён"
     exit 0
 }
 
-# ─── Удалить всё ─────────────────────────────────────────────────────────────
+# ─── Удалить всё (включая WARP) ──────────────────────────────────────────────
 delete_all() {
-    read -rp "Удалить всё (gost + WARP + пакеты)? Это действие необратимо. [y/N]: " confirm
+    read -rp "Удалить всё (gost + WARP)? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
     step "Удаление всего"
@@ -383,11 +376,10 @@ delete_all() {
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
     rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
-    # Удаляем лог
     rm -f "$LOG_FILE"
 
     systemctl daemon-reload
-    echo "Всё удалено."
+    echo "Всё удалено (включая WARP)."
     log "Всё удалено"
     exit 0
 }
@@ -400,8 +392,8 @@ main_menu() {
         echo "=== MTProxy Tunnel (EU) ==="
         echo "1) Создать туннель (установить gost + WARP)"
         echo "2) Статус туннеля"
-        echo "3) Удалить туннель"
-        echo "4) Удалить всё (gost + WARP + пакеты)"
+        echo "3) Удалить туннель (только gost)"
+        echo "4) Удалить всё (gost + WARP)"
         echo "0) Выход"
         echo ""
         read -rp "Выбор: " choice
