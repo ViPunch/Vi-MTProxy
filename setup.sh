@@ -1,0 +1,589 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── Константы ────────────────────────────────────────────────────────────────
+MTG_DIR="/etc/mtg"
+MTG_BIN="/usr/local/bin/mtg"
+CLIENTS_CONF="$MTG_DIR/clients.conf"
+MODE_FILE="$MTG_DIR/mode"
+EU_IP_FILE="$MTG_DIR/eu_ip"
+
+SNI_LIST=(
+    "www.google.com"
+    "www.cloudflare.com"
+    "www.amazon.com"
+    "www.microsoft.com"
+    "www.apple.com"
+    "www.youtube.com"
+    "www.facebook.com"
+    "www.twitter.com"
+    "www.discord.com"
+    "www.twitch.tv"
+    "www.github.com"
+    "www.wikipedia.org"
+    "www.reddit.com"
+    "www.vk.ru"
+    "www.yandex.ru"
+    "www.mail.ru"
+    "www.zoom.us"
+    "www.ok.ru"
+    "www.slack.com"
+    "www.rambler.ru"
+)
+
+# ─── Утилиты ──────────────────────────────────────────────────────────────────
+die() { echo "ОШИБКА: $*" >&2; exit 1; }
+
+get_public_ip() {
+    curl -s --max-time 5 https://api.ipify.org || echo "UNKNOWN"
+}
+
+read_mode() {
+    cat "$MODE_FILE" 2>/dev/null || echo ""
+}
+
+read_eu_ip() {
+    cat "$EU_IP_FILE" 2>/dev/null || echo ""
+}
+
+# Читает поле из строки clients.conf: <name>:<secret>:<port>:<sni>
+conf_field() {
+    local line="$1" field="$2"
+    echo "$line" | cut -d: -f"$field"
+}
+
+iter_clients() {
+    [[ -f "$CLIENTS_CONF" ]] || return 0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "$line"
+    done < "$CLIENTS_CONF"
+}
+
+client_exists() {
+    local name="$1"
+    grep -q "^${name}:" "$CLIENTS_CONF" 2>/dev/null
+}
+
+# ─── Установка mtg ────────────────────────────────────────────────────────────
+install_mtg_binary() {
+    echo "Скачиваю mtg..."
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *) die "Неподдерживаемая архитектура: $arch" ;;
+    esac
+
+    local api_url="https://api.github.com/repos/9seconds/mtg/releases/latest"
+    local release_json
+    release_json=$(curl -sSf "$api_url") || die "Не удалось получить информацию о релизе mtg"
+
+    # Ищем URL: содержит linux и нужную архитектуру, не содержит -v3 или -v9
+    local download_url
+    download_url=$(echo "$release_json" \
+        | grep -o '"browser_download_url": *"[^"]*"' \
+        | grep -o 'https://[^"]*' \
+        | grep "linux" \
+        | grep "$arch" \
+        | grep -v '\-v3\b' \
+        | grep -v '\-v9\b' \
+        | grep '\.tar\.gz$' \
+        | head -1)
+
+    [[ -z "$download_url" ]] && die "Не найден подходящий релиз mtg для linux/$arch"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap "rm -rf $tmpdir" RETURN
+
+    curl -sSfL "$download_url" -o "$tmpdir/mtg.tar.gz" || die "Ошибка скачивания mtg"
+    tar -xzf "$tmpdir/mtg.tar.gz" -C "$tmpdir"
+
+    local bin
+    bin=$(find "$tmpdir" -type f -name "mtg" | head -1)
+    [[ -z "$bin" ]] && die "Бинарник mtg не найден в архиве"
+
+    cp "$bin" "$MTG_BIN"
+    chmod +x "$MTG_BIN"
+    echo "mtg установлен: $("$MTG_BIN" --version 2>&1 | head -1)"
+}
+
+# ─── Генерация конфига toml ───────────────────────────────────────────────────
+write_toml() {
+    local name="$1" secret="$2" port="$3"
+    local mode
+    mode=$(read_mode)
+    local toml_path="$MTG_DIR/${name}.toml"
+
+    if [[ "$mode" == "cascade" ]]; then
+        local eu_ip
+        eu_ip=$(read_eu_ip)
+        cat > "$toml_path" <<EOF
+secret = "$secret"
+bind-to = "0.0.0.0:$port"
+
+[network]
+proxies = ["socks5://${eu_ip}:1080"]
+EOF
+    else
+        cat > "$toml_path" <<EOF
+secret = "$secret"
+bind-to = "0.0.0.0:$port"
+EOF
+    fi
+}
+
+# ─── Systemd-юнит ─────────────────────────────────────────────────────────────
+write_service() {
+    local name="$1"
+    cat > "/etc/systemd/system/mtg-${name}.service" <<EOF
+[Unit]
+Description=MTG Proxy - $name
+After=network.target
+
+[Service]
+ExecStart=$MTG_BIN run $MTG_DIR/${name}.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# ─── Добавление клиента ───────────────────────────────────────────────────────
+add_client() {
+    local default_name="${1:-}"
+
+    # Имя клиента
+    local name
+    if [[ -z "$default_name" ]]; then
+        read -rp "Введите имя клиента (без пробелов) [по умолчанию: default]: " name
+        name="${name:-default}"
+    else
+        name="$default_name"
+    fi
+
+    if [[ "$name" =~ [[:space:]:] ]]; then
+        echo "Имя не должно содержать пробелы или двоеточие."
+        return 1
+    fi
+    if client_exists "$name"; then
+        echo "Клиент '$name' уже существует."
+        return 1
+    fi
+
+    # Порт
+    local port
+    read -rp "Введите порт [по умолчанию: 443]: " port
+    port="${port:-443}"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        echo "Некорректный порт."
+        return 1
+    fi
+
+    # SNI
+    echo ""
+    echo "Выберите SNI-домен:"
+    local i=1
+    for sni in "${SNI_LIST[@]}"; do
+        printf " %2d) %-30s" "$i" "$sni"
+        (( i % 2 == 0 )) && echo "" || true
+        (( i++ ))
+    done
+    echo ""
+    echo " 21) Ввести вручную"
+    echo ""
+
+    local sni_choice sni_domain
+    read -rp "Ваш выбор [1-21]: " sni_choice
+    if [[ "$sni_choice" == "21" ]]; then
+        read -rp "Введите домен: " sni_domain
+        if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
+            echo "Некорректный домен."
+            return 1
+        fi
+    elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
+        sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
+    else
+        echo "Некорректный выбор."
+        return 1
+    fi
+
+    # Генерация секрета
+    echo "Генерирую секрет..."
+    local secret
+    secret=$("$MTG_BIN" generate-secret --hex tls "$sni_domain") \
+        || die "Ошибка генерации секрета"
+
+    # Сохранение
+    mkdir -p "$MTG_DIR"
+    echo "${name}:${secret}:${port}:${sni_domain}" >> "$CLIENTS_CONF"
+
+    write_toml "$name" "$secret" "$port"
+    write_service "$name"
+
+    ufw allow "${port}/tcp" > /dev/null 2>&1 || true
+    ufw --force enable > /dev/null 2>&1 || true
+
+    systemctl daemon-reload
+    systemctl enable --now "mtg-${name}"
+
+    local public_ip
+    public_ip=$(get_public_ip)
+    echo ""
+    echo "Клиент $name создан."
+    echo "tg://proxy?server=${public_ip}&port=${port}&secret=${secret}"
+    echo ""
+}
+
+# ─── Управление клиентами ─────────────────────────────────────────────────────
+list_clients() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return
+    fi
+    printf "\n%-3s %-20s %-8s %s\n" "#" "Имя" "Порт" "Секрет"
+    printf "%-3s %-20s %-8s %s\n" "---" "--------------------" "--------" "------"
+    local i=1
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname cport csecret
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        printf "%-3s %-20s %-8s %s\n" "$i" "$cname" "$cport" "${csecret:0:16}..."
+        (( i++ ))
+    done < "$CLIENTS_CONF"
+    echo ""
+}
+
+delete_client() {
+    list_clients
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        return
+    fi
+
+    local name
+    read -rp "Введите имя клиента для удаления: " name
+    if ! client_exists "$name"; then
+        echo "Клиент '$name' не найден."
+        return 1
+    fi
+
+    local line
+    line=$(grep "^${name}:" "$CLIENTS_CONF")
+    local port
+    port=$(conf_field "$line" 3)
+
+    systemctl stop "mtg-${name}" 2>/dev/null || true
+    systemctl disable "mtg-${name}" 2>/dev/null || true
+    rm -f "/etc/systemd/system/mtg-${name}.service" "$MTG_DIR/${name}.toml"
+
+    # Удаляем строку из clients.conf
+    local tmpfile
+    tmpfile=$(mktemp)
+    grep -v "^${name}:" "$CLIENTS_CONF" > "$tmpfile" || true
+    mv "$tmpfile" "$CLIENTS_CONF"
+
+    ufw delete allow "${port}/tcp" > /dev/null 2>&1 || true
+    systemctl daemon-reload
+
+    echo "Клиент '$name' удалён."
+}
+
+manage_clients() {
+    while true; do
+        echo ""
+        echo "=== Управление клиентами ==="
+        echo "1) Список клиентов"
+        echo "2) Добавить клиента"
+        echo "3) Удалить клиента"
+        echo "0) Назад"
+        echo ""
+        read -rp "Выбор: " choice
+        case "$choice" in
+            1) list_clients ;;
+            2) add_client ;;
+            3) delete_client ;;
+            0) return ;;
+            *) echo "Неверный выбор." ;;
+        esac
+    done
+}
+
+# ─── Показать ссылки ──────────────────────────────────────────────────────────
+show_links() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return
+    fi
+
+    local public_ip
+    public_ip=$(get_public_ip)
+    echo ""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport csni
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        csni=$(conf_field "$line" 4)
+        echo "Клиент: $cname  SNI: $csni"
+        echo "tg://proxy?server=${public_ip}&port=${cport}&secret=${csecret}"
+        echo ""
+    done < "$CLIENTS_CONF"
+}
+
+# ─── Статус сервисов ──────────────────────────────────────────────────────────
+show_status() {
+    if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
+        echo "Клиентов нет."
+        return
+    fi
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname
+        cname=$(conf_field "$line" 1)
+        echo ""
+        echo "--- mtg-${cname} ---"
+        systemctl status "mtg-${cname}" --no-pager -l 2>/dev/null || echo "Сервис не найден."
+    done < "$CLIENTS_CONF"
+}
+
+# ─── Управление (рестарт / обновление / удаление) ────────────────────────────
+restart_all() {
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname
+        cname=$(conf_field "$line" 1)
+        systemctl restart "mtg-${cname}" && echo "Перезапущен: mtg-${cname}"
+    done < "$CLIENTS_CONF"
+}
+
+update_mtg() {
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname
+        cname=$(conf_field "$line" 1)
+        systemctl stop "mtg-${cname}" 2>/dev/null || true
+    done < "$CLIENTS_CONF"
+
+    install_mtg_binary
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname
+        cname=$(conf_field "$line" 1)
+        systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}"
+    done < "$CLIENTS_CONF"
+}
+
+bind_eu_server() {
+    local eu_ip
+    read -rp "Введите IP EU-сервера: " eu_ip
+    [[ -z "$eu_ip" ]] && { echo "IP не может быть пустым."; return 1; }
+
+    echo "$eu_ip" > "$EU_IP_FILE"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        write_toml "$cname" "$csecret" "$cport"
+        systemctl restart "mtg-${cname}"
+    done < "$CLIENTS_CONF"
+
+    echo "EU-сервер привязан: $eu_ip"
+}
+
+unbind_eu_server() {
+    # Временно переключаемся в single для write_toml, потом возвращаем cascade
+    local saved_mode
+    saved_mode=$(read_mode)
+    echo "single" > "$MODE_FILE"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        write_toml "$cname" "$csecret" "$cport"
+        systemctl restart "mtg-${cname}"
+    done < "$CLIENTS_CONF"
+
+    echo "$saved_mode" > "$MODE_FILE"
+    rm -f "$EU_IP_FILE"
+    echo "EU-сервер отвязан. Трафик идёт напрямую."
+}
+
+remove_all() {
+    read -rp "Удалить всё? Это действие необратимо. [y/N]: " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
+
+    if [[ -f "$CLIENTS_CONF" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local cname
+            cname=$(conf_field "$line" 1)
+            systemctl stop "mtg-${cname}" 2>/dev/null || true
+            systemctl disable "mtg-${cname}" 2>/dev/null || true
+            rm -f "/etc/systemd/system/mtg-${cname}.service" "$MTG_DIR/${cname}.toml"
+        done < "$CLIENTS_CONF"
+    fi
+
+    rm -f "$MTG_BIN"
+    rm -rf "$MTG_DIR"
+    systemctl daemon-reload
+    echo "Удалено."
+}
+
+manage_menu() {
+    local mode
+    mode=$(read_mode)
+    while true; do
+        echo ""
+        echo "=== Управление ==="
+        echo "1) Перезапустить все сервисы"
+        echo "2) Обновить mtg"
+        if [[ "$mode" == "cascade" ]]; then
+            echo "3) Привязать EU-сервер"
+            echo "4) Отвязать EU-сервер"
+            echo "5) Удалить всё"
+        else
+            echo "3) Удалить всё"
+        fi
+        echo "0) Назад"
+        echo ""
+        read -rp "Выбор: " choice
+        case "$choice" in
+            1) restart_all ;;
+            2) update_mtg ;;
+            3)
+                if [[ "$mode" == "cascade" ]]; then
+                    bind_eu_server
+                else
+                    remove_all
+                fi
+                ;;
+            4) [[ "$mode" == "cascade" ]] && unbind_eu_server || echo "Неверный выбор." ;;
+            5) [[ "$mode" == "cascade" ]] && remove_all || echo "Неверный выбор." ;;
+            0) return ;;
+            *) echo "Неверный выбор." ;;
+        esac
+    done
+}
+
+# ─── Первоначальная установка ─────────────────────────────────────────────────
+setup_single() {
+    echo "Устанавливаю зависимости..."
+    apt-get update -qq
+    apt-get install -y curl wget ufw
+
+    install_mtg_binary
+
+    mkdir -p "$MTG_DIR"
+    echo "single" > "$MODE_FILE"
+    touch "$CLIENTS_CONF"
+
+    echo ""
+    echo "Создаём первого клиента:"
+    add_client "default"
+
+    echo ""
+    echo "Установка завершена. Режим: одиночный."
+}
+
+setup_cascade() {
+    echo "Устанавливаю зависимости..."
+    apt-get update -qq
+    apt-get install -y curl wget ufw
+
+    install_mtg_binary
+
+    local eu_ip
+    read -rp "Введите IP EU-сервера: " eu_ip
+    [[ -z "$eu_ip" ]] && die "IP EU-сервера не может быть пустым"
+
+    mkdir -p "$MTG_DIR"
+    echo "cascade" > "$MODE_FILE"
+    echo "$eu_ip" > "$EU_IP_FILE"
+    touch "$CLIENTS_CONF"
+
+    echo ""
+    echo "Создаём первого клиента:"
+    add_client "default"
+
+    echo ""
+    echo "============================================================"
+    echo "Шаг 2: настройте второй сервер (EU)."
+    echo ""
+    echo "Скопируйте tunnel.sh на EU-сервер и запустите:"
+    echo "  bash tunnel.sh"
+    echo ""
+    echo "Скрипт настроит gost + WARP на EU-сервере."
+    echo "После завершения каскад будет работать."
+    echo "============================================================"
+}
+
+# ─── Главное меню ─────────────────────────────────────────────────────────────
+main_menu() {
+    local mode
+    mode=$(read_mode)
+    local eu_ip
+    eu_ip=$(read_eu_ip)
+
+    local mode_label
+    if [[ "$mode" == "cascade" ]]; then
+        mode_label="каскад (EU: ${eu_ip:-не задан})"
+    else
+        mode_label="одиночный"
+    fi
+
+    while true; do
+        echo ""
+        echo "=== MTProxy Setup ==="
+        echo "Режим: $mode_label"
+        echo "---"
+        echo "1) Управление клиентами (добавить / список / удалить)"
+        echo "2) Показать ссылки клиентов"
+        echo "3) Статус сервисов"
+        echo "4) Управление (рестарт / удаление / обновление)"
+        echo "0) Выход"
+        echo ""
+        read -rp "Выбор: " choice
+        case "$choice" in
+            1) manage_clients ;;
+            2) show_links ;;
+            3) show_status ;;
+            4) manage_menu ;;
+            0) exit 0 ;;
+            *) echo "Неверный выбор." ;;
+        esac
+    done
+}
+
+# ─── Точка входа ──────────────────────────────────────────────────────────────
+[[ "$EUID" -ne 0 ]] && die "Запустите скрипт от root: sudo bash $0"
+
+if [[ ! -f "$MODE_FILE" ]]; then
+    echo ""
+    echo "=== MTProxy Setup ==="
+    echo "Выберите режим:"
+    echo "1) Одиночный (без каскада) — всё на одном сервере"
+    echo "2) Каскад — этот сервер (RU) → второй сервер (EU) → WARP"
+    echo ""
+    read -rp "Выбор [1/2]: " mode_choice
+    case "$mode_choice" in
+        1) setup_single ;;
+        2) setup_cascade ;;
+        *) die "Неверный выбор" ;;
+    esac
+fi
+
+main_menu
