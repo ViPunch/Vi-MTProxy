@@ -286,8 +286,8 @@ delete_client() {
     local port
     port=$(conf_field "$line" 3)
 
-    systemctl stop "mtg-${name}" 2>/dev/null || true
-    systemctl disable "mtg-${name}" 2>/dev/null || true
+    timeout 5 systemctl stop "mtg-${name}" 2>/dev/null || true
+    timeout 5 systemctl disable "mtg-${name}" 2>/dev/null || true
     rm -f "/etc/systemd/system/mtg-${name}.service" "$MTG_DIR/${name}.toml"
 
     # Удаляем строку из clients.conf
