@@ -608,4 +608,27 @@ if [[ ! -f "$MODE_FILE" ]]; then
     esac
 fi
 
+# Быстрый вызов через аргументы командной строки
+if [[ $# -ge 2 && "$1" == "set-eu" ]]; then
+    eu_ip="$2"
+    [[ -z "$eu_ip" ]] && die "IP не может быть пустым"
+
+    echo "$eu_ip" > "$EU_IP_FILE"
+    echo "cascade" > "$MODE_FILE"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        write_toml "$cname" "$csecret" "$cport"
+        systemctl restart "mtg-${cname}" 2>/dev/null || true
+    done < "$CLIENTS_CONF"
+
+    echo "EU-сервер привязан: $eu_ip"
+    echo "Все сервисы перезапущены."
+    exit 0
+fi
+
 main_menu
