@@ -237,7 +237,11 @@ add_client() {
     local secret
     # mtg v2: ee + 16 байт домен (с null-паддингом) + 16 байт ключ
     local domain_bytes
-    domain_bytes=$(printf '%-16s' "$sni_domain" | head -c 16 | xxd -p | tr -d '\n')
+    domain_bytes=$(printf '%s' "$sni_domain" | head -c 16 | xxd -p | tr -d '\n')
+    # Паддинг до 32 hex символов (16 байт)
+    while [[ ${#domain_bytes} -lt 32 ]]; do
+        domain_bytes="${domain_bytes}00"
+    done
     local key_bytes
     key_bytes=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
     secret="ee${domain_bytes}${key_bytes}"
