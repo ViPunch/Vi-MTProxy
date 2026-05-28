@@ -220,50 +220,35 @@ add_client() {
 
     # SNI
     echo ""
-    echo "Выберите тип секрета:"
-    echo "1) Simple (совместимый со всеми клиентами)"
-    echo "2) Secured с TLS (может не работать на старых клиентах)"
+    echo "Выберите SNI-домен:"
+    local i=1
+    for sni in "${SNI_LIST[@]}"; do
+        printf " %2d) %-30s" "$i" "$sni"
+        if (( i % 2 == 0 )); then echo ""; fi
+        (( i++ ))
+    done
     echo ""
-    local secret_type
-    read -rp "Ваш выбор [1-2, по умолчанию: 1]: " secret_type
-    secret_type="${secret_type:-1}"
+    echo " 21) Ввести вручную"
+    echo ""
 
-    local sni_domain=""
-    if [[ "$secret_type" == "2" ]]; then
-        echo ""
-        echo "Выберите SNI-домен:"
-        local i=1
-        for sni in "${SNI_LIST[@]}"; do
-            printf " %2d) %-30s" "$i" "$sni"
-            if (( i % 2 == 0 )); then echo ""; fi
-            (( i++ ))
-        done
-        echo ""
-        echo " 21) Ввести вручную"
-        echo ""
-
-        local sni_choice
-        read -rp "Ваш выбор [1-21]: " sni_choice
-        if [[ "$sni_choice" == "21" ]]; then
-            read -rp "Введите домен: " sni_domain
-            if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
-                echo "Некорректный домен."
-                return 1
-            fi
-        elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
-            sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
-        else
-            echo "Некорректный выбор."
+    local sni_choice sni_domain
+    read -rp "Ваш выбор [1-21]: " sni_choice
+    if [[ "$sni_choice" == "21" ]]; then
+        read -rp "Введите домен: " sni_domain
+        if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
+            echo "Некорректный домен."
             return 1
         fi
+    elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
+        sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
+    else
+        echo "Некорректный выбор."
+        return 1
     fi
 
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-    local mtg_ver
-    mtg_ver=$("$MTG_BIN" --version 2>&1 | head -1)
-    echo "Версия mtg: $mtg_ver"
 
     secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null)
     if [[ -z "$secret" ]]; then
