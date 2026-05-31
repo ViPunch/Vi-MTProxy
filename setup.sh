@@ -154,6 +154,21 @@ run_mtg_doctor() {
     "$MTG_BIN" doctor "$MTG_DIR/${name}.toml"
 }
 
+secret_sni() {
+    local secret="$1"
+    local pad_len=$(( (4 - ${#secret} % 4) % 4 ))
+    local padded="$secret"
+    local i
+    for (( i = 0; i < pad_len; i++ )); do
+        padded+="="
+    done
+
+    printf '%s' "$padded" \
+        | tr '_-' '/+' \
+        | base64 -d 2>/dev/null \
+        | tail -c +18 2>/dev/null || true
+}
+
 replace_client_secret_for_sni() {
     local old_sni="$1" new_sni="$2"
     [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
@@ -162,13 +177,14 @@ replace_client_secret_for_sni() {
     tmpfile=$(mktemp)
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport csni new_secret
+        local cname csecret cport csni new_secret embedded_sni
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         csni=$(conf_field "$line" 4)
+        embedded_sni=$(secret_sni "$csecret")
 
-        if [[ "$csni" == "$old_sni" ]]; then
+        if [[ "$csni" == "$old_sni" || "$embedded_sni" == "$old_sni" ]]; then
             new_secret=$($MTG_BIN generate-secret "$new_sni" 2>/dev/null) || die "Ошибка генерации секрета для $new_sni"
             echo "${cname}:${new_secret}:${cport}:${new_sni}" >> "$tmpfile"
             write_toml "$cname" "$new_secret" "$cport"
@@ -179,6 +195,39 @@ replace_client_secret_for_sni() {
         fi
     done < "$CLIENTS_CONF"
     mv "$tmpfile" "$CLIENTS_CONF"
+}
+
+sync_client_secret_for_sni() {
+    local target_sni="$1"
+    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
+
+    local tmpfile changed=false
+    tmpfile=$(mktemp)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport csni new_secret embedded_sni
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        csni=$(conf_field "$line" 4)
+        embedded_sni=$(secret_sni "$csecret")
+
+        if [[ "$csni" == "$target_sni" && "$embedded_sni" != "$target_sni" ]]; then
+            new_secret=$($MTG_BIN generate-secret "$target_sni" 2>/dev/null) || die "Ошибка генерации секрета для $target_sni"
+            echo "${cname}:${new_secret}:${cport}:${target_sni}" >> "$tmpfile"
+            write_toml "$cname" "$new_secret" "$cport"
+            kill_service "mtg-${cname}"
+            systemctl start "mtg-${cname}" 2>/dev/null || true
+            changed=true
+        else
+            echo "$line" >> "$tmpfile"
+        fi
+    done < "$CLIENTS_CONF"
+    mv "$tmpfile" "$CLIENTS_CONF"
+
+    if [[ "$changed" == true ]]; then
+        echo "Обновлены client secrets для managed domain: $target_sni"
+    fi
 }
 
 setup_managed_fronting_domain() {
@@ -206,6 +255,7 @@ setup_managed_fronting_domain() {
     if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
         replace_client_secret_for_sni "$current_domain" "$domain"
     fi
+    sync_client_secret_for_sni "$domain"
 
     echo "Managed fronting-домен настроен: $domain"
 }
