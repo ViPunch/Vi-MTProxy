@@ -37,14 +37,10 @@ HTTPS_PORTS=(443 8443 2053 2083 2087 2096)
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
-# Сохраняем/восстанавливаем позицию меню без очистки всего терминала.
-menu_mark() { echo -ne "\033[s"; }
-menu_rewind() {
-    echo -ne "\033[u"
-    # Очищаем от курсора до конца экрана, чтобы стереть вывод подменю
-    echo -ne "\033[J"
-}
-menu_line() { echo -ne "\033[2K"; echo "$1"; }
+# Очищаем экран перед отрисовкой меню. Вывод действий показывается до
+# следующей перерисовки и удерживается паузой "Нажмите Enter".
+menu_clear() { clear 2>/dev/null || printf '\033[2J\033[H'; }
+pause() { read -rp "Нажмите Enter для продолжения..." _; }
 
 kill_service() {
     local svc="$1"
@@ -385,29 +381,21 @@ delete_client() {
 }
 
 manage_clients() {
-    local menu_saved=false
     while true; do
-        if [[ "$menu_saved" == false ]]; then
-            menu_mark
-            menu_saved=true
-        else
-            menu_rewind
-        fi
-
-        menu_line ""
-        menu_line "=== Управление клиентами ==="
-        menu_line "1) Список клиентов"
-        menu_line "2) Добавить клиента"
-        menu_line "3) Удалить клиента"
-        menu_line "0) Назад"
-        menu_line ""
-        echo -ne "\033[2K"
+        menu_clear
+        echo ""
+        echo "=== Управление клиентами ==="
+        echo "1) Список клиентов"
+        echo "2) Добавить клиента"
+        echo "3) Удалить клиента"
+        echo "0) Назад"
+        echo ""
         read -rp "Выбор: " choice
 
         case "$choice" in
-            1) list_clients; read -rp "Нажмите Enter для продолжения..." ;;
-            2) add_client ;;
-            3) delete_client ;;
+            1) list_clients; pause ;;
+            2) add_client; pause ;;
+            3) delete_client; pause ;;
             0) return ;;
             *) echo "Неверный выбор."; sleep 1 ;;
         esac
@@ -579,50 +567,40 @@ remove_all() {
 }
 
 manage_menu() {
-    local menu_saved=false
     while true; do
         local mode
         mode=$(read_mode)
-        if [[ "$menu_saved" == false ]]; then
-            menu_mark
-            menu_saved=true
-        else
-            menu_rewind
-        fi
-
-        menu_line ""
-        menu_line "=== Управление ==="
-        menu_line "1) Перезапустить все сервисы"
-        menu_line "2) Обновить mtg"
-        menu_line "3) Принудительная остановка всех сервисов"
+        menu_clear
+        echo ""
+        echo "=== Управление ==="
+        echo "1) Перезапустить все сервисы"
+        echo "2) Обновить mtg"
+        echo "3) Принудительная остановка всех сервисов"
         if [[ "$mode" == "cascade" ]]; then
-            menu_line "4) Привязать EU-сервер"
-            menu_line "5) Отвязать EU-сервер"
-            menu_line "6) Удалить всё"
+            echo "4) Привязать EU-сервер"
+            echo "5) Отвязать EU-сервер"
+            echo "6) Удалить всё"
         else
-            menu_line "4) Удалить всё"
-            menu_line ""
-            menu_line ""
+            echo "4) Удалить всё"
         fi
-        menu_line "0) Назад"
-        menu_line ""
-        echo -ne "\033[2K"
+        echo "0) Назад"
+        echo ""
         read -rp "Выбор: " choice
 
         case "$choice" in
-            1) restart_all; read -rp "Нажмите Enter..." ;;
-            2) update_mtg; read -rp "Нажмите Enter..." ;;
-            3) force_stop_all ;;
+            1) restart_all; pause ;;
+            2) update_mtg; pause ;;
+            3) force_stop_all; pause ;;
             4)
                 if [[ "$mode" == "cascade" ]]; then
-                    bind_eu_server
+                    bind_eu_server; pause
                 else
                     remove_all
                 fi
                 ;;
             5)
                 if [[ "$mode" == "cascade" ]]; then
-                    unbind_eu_server
+                    unbind_eu_server; pause
                 else
                     echo "Неверный выбор."; sleep 1
                 fi
@@ -743,7 +721,6 @@ switch_mode() {
 
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
-    local menu_saved=false
     while true; do
         local mode
         mode=$(read_mode)
@@ -757,33 +734,26 @@ main_menu() {
             mode_label="одиночный"
         fi
 
-        if [[ "$menu_saved" == false ]]; then
-            menu_mark
-            menu_saved=true
-        else
-            menu_rewind
-        fi
-
-        menu_line ""
-        menu_line "=== MTProxy Setup ==="
-        menu_line "Режим: $mode_label"
-        menu_line "---"
-        menu_line "1) Управление клиентами (добавить / список / удалить)"
-        menu_line "2) Показать ссылки клиентов"
-        menu_line "3) Статус сервисов"
-        menu_line "4) Управление (рестарт / удаление / обновление)"
-        menu_line "5) Сменить режим (одиночный / каскад)"
-        menu_line "0) Выход"
-        menu_line ""
-        echo -ne "\033[2K"
+        menu_clear
+        echo ""
+        echo "=== MTProxy Setup ==="
+        echo "Режим: $mode_label"
+        echo "---"
+        echo "1) Управление клиентами (добавить / список / удалить)"
+        echo "2) Показать ссылки клиентов"
+        echo "3) Статус сервисов"
+        echo "4) Управление (рестарт / удаление / обновление)"
+        echo "5) Сменить режим (одиночный / каскад)"
+        echo "0) Выход"
+        echo ""
         read -rp "Выбор: " choice
 
         case "$choice" in
             1) manage_clients ;;
-            2) show_links; read -rp "Нажмите Enter для продолжения..." ;;
-            3) show_status; read -rp "Нажмите Enter для продолжения..." ;;
+            2) show_links; pause ;;
+            3) show_status; pause ;;
             4) manage_menu ;;
-            5) switch_mode ;;
+            5) switch_mode; pause ;;
             0) exit 0 ;;
             *) echo "Неверный выбор."; sleep 1 ;;
         esac
