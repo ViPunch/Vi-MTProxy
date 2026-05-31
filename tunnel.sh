@@ -133,6 +133,15 @@ install_warp() {
     log "WARP установлен"
 }
 
+cleanup_warp() {
+    command -v warp-cli &>/dev/null && warp-cli disconnect 2>/dev/null || true
+    command -v warp-cli &>/dev/null && warp-cli registration delete 2>/dev/null || true
+    apt-get purge -y cloudflare-warp > /dev/null 2>&1 || true
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    apt-get update -qq || true
+}
+
 # ─── Настройка WARP ──────────────────────────────────────────────────────────
 configure_warp() {
     step "Настройка WARP"
@@ -371,10 +380,10 @@ delete_tunnel() {
 
 # ─── Удалить всё ─────────────────────────────────────────────────────────────
 delete_all() {
-    read -rp "Удалить gost? Это действие необратимо. [y/N]: " confirm
+    read -rp "Удалить gost и WARP для чистой установки? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
-    step "Удаление gost"
+    step "Удаление gost и WARP"
 
     systemctl stop gost-tunnel 2>/dev/null || true
     systemctl disable gost-tunnel 2>/dev/null || true
@@ -382,11 +391,12 @@ delete_all() {
     rm -f "$GOST_BIN"
     ufw delete allow 1080/tcp > /dev/null 2>&1 || true
 
+    cleanup_warp
     rm -f "$LOG_FILE"
 
     systemctl daemon-reload
-    echo "gost удалён. WARP оставлен на месте."
-    log "gost удалён"
+    echo "gost и WARP удалены."
+    log "gost и WARP удалены"
     exit 0
 }
 
@@ -406,6 +416,7 @@ main_menu() {
         menu_line "1) Создать туннель (установить gost + WARP)"
         menu_line "2) Статус туннеля"
         menu_line "3) Удалить туннель (только gost)"
+        menu_line "4) Удалить всё (gost + WARP)"
         menu_line "0) Выход"
         menu_line ""
         echo -ne "\033[2K"
@@ -415,6 +426,7 @@ main_menu() {
             1) create_tunnel ;;
             2) tunnel_status; read -rp "Нажмите Enter для продолжения..." ;;
             3) delete_tunnel ;;
+            4) delete_all ;;
             0) exit 0 ;;
             *) echo "Неверный выбор."; sleep 1 ;;
         esac

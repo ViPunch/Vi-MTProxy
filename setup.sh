@@ -386,6 +386,15 @@ install_warp() {
     echo "WARP установлен."
 }
 
+cleanup_warp() {
+    command -v warp-cli &>/dev/null && warp-cli disconnect 2>/dev/null || true
+    command -v warp-cli &>/dev/null && warp-cli registration delete 2>/dev/null || true
+    apt-get purge -y cloudflare-warp > /dev/null 2>&1 || true
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    apt-get update -qq || true
+}
+
 # Регистрация + proxy-режим + подключение. Идемпотентно.
 configure_warp() {
     local current_status
@@ -842,9 +851,9 @@ remove_all() {
         done < "$CLIENTS_CONF"
     fi
 
-    # Если был локальный WARP — отключаем (сам пакет оставляем на месте)
-    if [[ -f "$WARP_FILE" ]] && command -v warp-cli &>/dev/null; then
-        warp-cli disconnect 2>/dev/null || true
+    # Для чистой установки удаляем и конфигурацию, и пакет WARP.
+    if [[ -f "$WARP_FILE" ]] || command -v warp-cli &>/dev/null; then
+        cleanup_warp
     fi
 
     rm -f "$MTG_BIN"
