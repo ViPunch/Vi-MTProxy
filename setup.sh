@@ -7,6 +7,7 @@ MTG_BIN="/usr/local/bin/mtg"
 CLIENTS_CONF="$MTG_DIR/clients.conf"
 MODE_FILE="$MTG_DIR/mode"
 EU_IP_FILE="$MTG_DIR/eu_ip"
+FRONTING_DOMAIN_FILE="$MTG_DIR/fronting_domain"
 WARP_FILE="$MTG_DIR/warp"          # флаг: локальный WARP включён (одиночный режим)
 WARP_SOCKS="127.0.0.1:40000"       # SOCKS5 от WARP в proxy-режиме
 
@@ -59,6 +60,208 @@ kill_service() {
 
 get_public_ip() {
     curl -s --max-time 5 https://api.ipify.org || echo "UNKNOWN"
+}
+
+read_fronting_domain() {
+    cat "$FRONTING_DOMAIN_FILE" 2>/dev/null || echo ""
+}
+
+is_valid_domain() {
+    local domain="$1"
+    [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+resolve_domain_ipv4() {
+    local domain="$1"
+    getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9.]+$' | sort -u
+}
+
+domain_points_to_ip() {
+    local domain="$1" expected_ip="$2"
+    resolve_domain_ipv4 "$domain" | grep -qx "$expected_ip"
+}
+
+set_server_hostname() {
+    local domain="$1"
+    local public_ip
+    public_ip=$(get_public_ip)
+    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
+
+    hostnamectl set-hostname "$domain"
+    cat > /etc/hosts <<EOF
+127.0.0.1 localhost
+127.0.1.1 localhost.localdomain
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+$public_ip $domain ${domain%%.*}
+EOF
+}
+
+install_https_dependencies() {
+    apt-get install -y nginx certbot python3-certbot-nginx || die "Ошибка установки nginx/certbot"
+}
+
+configure_nginx_fronting() {
+    local domain="$1"
+    mkdir -p /var/www/vi-mtpro-fronting
+    cat > /var/www/vi-mtpro-fronting/index.html <<EOF
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>$domain</title></head>
+<body><h1>$domain</h1><p>HTTPS fronting is ready.</p></body>
+</html>
+EOF
+
+    cat > /etc/nginx/sites-available/vi-mtpro-fronting.conf <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+
+    root /var/www/vi-mtpro-fronting;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+
+    ln -sf /etc/nginx/sites-available/vi-mtpro-fronting.conf /etc/nginx/sites-enabled/vi-mtpro-fronting.conf
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t || die "Конфиг nginx не прошёл проверку"
+    systemctl enable --now nginx || die "Не удалось запустить nginx"
+    systemctl reload nginx || die "Не удалось перезагрузить nginx"
+}
+
+ensure_https_certificate() {
+    local domain="$1"
+    certbot --nginx \
+        --non-interactive \
+        --agree-tos \
+        --register-unsafely-without-email \
+        -d "$domain" || die "Не удалось выпустить Let's Encrypt сертификат для $domain"
+    systemctl reload nginx || die "Не удалось перезагрузить nginx после certbot"
+}
+
+run_mtg_doctor() {
+    local name="$1"
+    "$MTG_BIN" doctor "$MTG_DIR/${name}.toml"
+}
+
+replace_client_secret_for_sni() {
+    local old_sni="$1" new_sni="$2"
+    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport csni new_secret
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        csni=$(conf_field "$line" 4)
+
+        if [[ "$csni" == "$old_sni" ]]; then
+            new_secret=$($MTG_BIN generate-secret "$new_sni" 2>/dev/null) || die "Ошибка генерации секрета для $new_sni"
+            echo "${cname}:${new_secret}:${cport}:${new_sni}" >> "$tmpfile"
+            write_toml "$cname" "$new_secret" "$cport"
+            kill_service "mtg-${cname}"
+            systemctl start "mtg-${cname}" 2>/dev/null || true
+        else
+            echo "$line" >> "$tmpfile"
+        fi
+    done < "$CLIENTS_CONF"
+    mv "$tmpfile" "$CLIENTS_CONF"
+}
+
+setup_managed_fronting_domain() {
+    local current_domain="${1:-$(read_fronting_domain)}"
+    local public_ip domain
+    public_ip=$(get_public_ip)
+    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
+
+    echo ""
+    if [[ -n "$current_domain" ]]; then
+        echo "Текущий managed domain: $current_domain"
+    fi
+    read -rp "Введите fronting-домен, уже указывающий на этот сервер: " domain
+    domain="${domain,,}"
+    [[ -z "$domain" ]] && die "Домен не может быть пустым"
+    is_valid_domain "$domain" || die "Некорректный домен"
+    domain_points_to_ip "$domain" "$public_ip" || die "Домен $domain должен резолвиться в $public_ip до продолжения"
+
+    set_server_hostname "$domain"
+    install_https_dependencies
+    configure_nginx_fronting "$domain"
+    ensure_https_certificate "$domain"
+
+    echo "$domain" > "$FRONTING_DOMAIN_FILE"
+    if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
+        replace_client_secret_for_sni "$current_domain" "$domain"
+    fi
+
+    echo "Managed fronting-домен настроен: $domain"
+}
+
+pick_client_sni() {
+    local managed_domain="$1"
+    local sni_choice sni_domain i
+
+    if [[ -n "$managed_domain" ]]; then
+        echo "" >&2
+        echo "Выберите режим SNI:" >&2
+        echo "  0) Managed domain (рекомендуется): $managed_domain" >&2
+        echo "  1) FakeTLS из списка / вручную" >&2
+        echo "" >&2
+        read -rp "Ваш выбор [0/1]: " sni_choice
+        sni_choice="${sni_choice:-0}"
+        if [[ "$sni_choice" == "0" ]]; then
+            echo "$managed_domain"
+            return 0
+        elif [[ "$sni_choice" != "1" ]]; then
+            echo "Некорректный выбор. Использую managed domain: $managed_domain" >&2
+            echo "$managed_domain"
+            return 0
+        fi
+    fi
+
+    echo "" >&2
+    echo "Выберите SNI-домен (Enter — случайный):" >&2
+    echo "  0) Случайный из списка" >&2
+    i=1
+    for sni in "${SNI_LIST[@]}"; do
+        printf " %2d) %-30s" "$i" "$sni" >&2
+        if (( i % 2 == 0 )); then echo "" >&2; fi
+        (( i++ ))
+    done
+    echo "" >&2
+    echo " 21) Ввести вручную" >&2
+    echo "" >&2
+
+    read -rp "Ваш выбор [0-21]: " sni_choice
+    sni_choice="${sni_choice:-0}"
+    if [[ "$sni_choice" == "0" ]]; then
+        sni_domain="${SNI_LIST[$((RANDOM % ${#SNI_LIST[@]}))]}"
+        echo "Выбран случайный SNI: $sni_domain" >&2
+    elif [[ "$sni_choice" == "21" ]]; then
+        read -rp "Введите домен: " sni_domain
+        if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
+            die "Некорректный домен."
+        fi
+    elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
+        sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
+    else
+        die "Некорректный выбор."
+    fi
+
+    echo "$sni_domain"
 }
 
 read_mode() {
@@ -304,6 +507,8 @@ EOF
 # ─── Добавление клиента ───────────────────────────────────────────────────────
 add_client() {
     local default_name="${1:-}"
+    local managed_domain
+    managed_domain=$(read_fronting_domain)
 
     # Имя клиента
     local name
@@ -346,38 +551,8 @@ add_client() {
         return 1
     fi
 
-    # SNI. Enter / 0 → случайный домен из списка.
-    echo ""
-    echo "Выберите SNI-домен (Enter — случайный):"
-    echo "  0) Случайный из списка"
-    local i=1
-    for sni in "${SNI_LIST[@]}"; do
-        printf " %2d) %-30s" "$i" "$sni"
-        if (( i % 2 == 0 )); then echo ""; fi
-        (( i++ ))
-    done
-    echo ""
-    echo " 21) Ввести вручную"
-    echo ""
-
-    local sni_choice sni_domain
-    read -rp "Ваш выбор [0-21]: " sni_choice
-    sni_choice="${sni_choice:-0}"
-    if [[ "$sni_choice" == "0" ]]; then
-        sni_domain="${SNI_LIST[$((RANDOM % ${#SNI_LIST[@]}))]}"
-        echo "Выбран случайный SNI: $sni_domain"
-    elif [[ "$sni_choice" == "21" ]]; then
-        read -rp "Введите домен: " sni_domain
-        if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
-            echo "Некорректный домен."
-            return 1
-        fi
-    elif [[ "$sni_choice" =~ ^[0-9]+$ ]] && (( sni_choice >= 1 && sni_choice <= 20 )); then
-        sni_domain="${SNI_LIST[$((sni_choice - 1))]}"
-    else
-        echo "Некорректный выбор."
-        return 1
-    fi
+    local sni_domain
+    sni_domain=$(pick_client_sni "$managed_domain")
 
     # Генерация секрета
     echo "Генерирую секрет..."
@@ -401,6 +576,14 @@ add_client() {
 
     systemctl daemon-reload
     systemctl enable --now "mtg-${name}"
+
+    echo ""
+    echo "Проверяю конфигурацию mtg..."
+    if ! run_mtg_doctor "$name"; then
+        echo ""
+        echo "ВНИМАНИЕ: mtg doctor нашёл проблему для клиента '$name'."
+        echo "Ссылка ниже всё равно выведена, но сначала исправьте замечания doctor."
+    fi
 
     local public_ip
     public_ip=$(get_public_ip)
@@ -522,7 +705,15 @@ show_status() {
         echo ""
         echo "--- mtg-${cname} ---"
         systemctl status "mtg-${cname}" --no-pager -l 2>/dev/null || echo "Сервис не найден."
+        echo ""
+        echo "doctor:"
+        run_mtg_doctor "$cname" 2>/dev/null || true
     done < "$CLIENTS_CONF"
+}
+
+configure_fronting_domain_menu() {
+    setup_managed_fronting_domain
+    pause
 }
 
 # ─── Управление (рестарт / обновление / удаление) ────────────────────────────
@@ -650,6 +841,8 @@ remove_all() {
     rm -f "$MTG_BIN"
     rm -f /usr/local/bin/vi-mtpro
     rm -f /usr/local/lib/vi-mtpro.sh
+    rm -f /etc/nginx/sites-enabled/vi-mtpro-fronting.conf
+    rm -f /etc/nginx/sites-available/vi-mtpro-fronting.conf
     rm -rf "$MTG_DIR"
     echo "Удалено."
     exit 0
@@ -701,14 +894,16 @@ manage_menu() {
         if [[ "$mode" == "cascade" ]]; then
             echo "4) Привязать EU-сервер"
             echo "5) Отвязать EU-сервер"
-            echo "6) Удалить всё"
+            echo "6) Настроить / сменить fronting-домен"
+            echo "7) Удалить всё"
         else
             if warp_enabled; then
                 echo "4) Локальный WARP: ВКЛ (выключить)"
             else
                 echo "4) Локальный WARP: ВЫКЛ (включить)"
             fi
-            echo "5) Удалить всё"
+            echo "5) Настроить / сменить fronting-домен"
+            echo "6) Удалить всё"
         fi
         echo "0) Назад"
         echo ""
@@ -729,10 +924,17 @@ manage_menu() {
                 if [[ "$mode" == "cascade" ]]; then
                     unbind_eu_server; pause
                 else
-                    remove_all
+                    configure_fronting_domain_menu
                 fi
                 ;;
             6)
+                if [[ "$mode" == "cascade" ]]; then
+                    configure_fronting_domain_menu
+                else
+                    remove_all
+                fi
+                ;;
+            7)
                 if [[ "$mode" == "cascade" ]]; then
                     remove_all
                 else
@@ -756,6 +958,13 @@ setup_single() {
     mkdir -p "$MTG_DIR"
     echo "single" > "$MODE_FILE"
     touch "$CLIENTS_CONF"
+
+    echo ""
+    local use_managed_domain
+    read -rp "Настроить managed fronting-домен с автоматическим HTTPS? [Y/n]: " use_managed_domain
+    if [[ -z "$use_managed_domain" || "$use_managed_domain" == "y" || "$use_managed_domain" == "Y" ]]; then
+        setup_managed_fronting_domain
+    fi
 
     echo ""
     local use_warp
@@ -788,6 +997,13 @@ setup_cascade() {
     echo "cascade" > "$MODE_FILE"
     echo "$eu_ip" > "$EU_IP_FILE"
     touch "$CLIENTS_CONF"
+
+    echo ""
+    local use_managed_domain
+    read -rp "Настроить managed fronting-домен с автоматическим HTTPS? [Y/n]: " use_managed_domain
+    if [[ -z "$use_managed_domain" || "$use_managed_domain" == "y" || "$use_managed_domain" == "Y" ]]; then
+        setup_managed_fronting_domain
+    fi
 
     echo ""
     echo "Создаём первого клиента:"
@@ -867,11 +1083,16 @@ main_menu() {
         else
             mode_label="одиночный"
         fi
+        local fronting_domain
+        fronting_domain=$(read_fronting_domain)
 
         menu_clear
         echo ""
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
+        if [[ -n "$fronting_domain" ]]; then
+            echo "Managed domain: $fronting_domain"
+        fi
         echo "---"
         echo "1) Управление клиентами (добавить / список / удалить)"
         echo "2) Показать ссылки клиентов"
