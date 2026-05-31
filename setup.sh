@@ -7,6 +7,8 @@ MTG_BIN="/usr/local/bin/mtg"
 CLIENTS_CONF="$MTG_DIR/clients.conf"
 MODE_FILE="$MTG_DIR/mode"
 EU_IP_FILE="$MTG_DIR/eu_ip"
+WARP_FILE="$MTG_DIR/warp"          # флаг: локальный WARP включён (одиночный режим)
+WARP_SOCKS="127.0.0.1:40000"       # SOCKS5 от WARP в proxy-режиме
 
 SNI_LIST=(
     "www.google.com"
@@ -37,9 +39,9 @@ HTTPS_PORTS=(443 8443 2053 2083 2087 2096)
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
-# Очищаем экран перед отрисовкой меню. Вывод действий показывается до
-# следующей перерисовки и удерживается паузой "Нажмите Enter".
-menu_clear() { clear 2>/dev/null || printf '\033[2J\033[H'; }
+# Терминал не очищаем — меню просто печатается следующим блоком,
+# чтобы весь предыдущий вывод (ссылки и т.д.) оставался на экране.
+menu_clear() { echo ""; }
 pause() { read -rp "Нажмите Enter для продолжения..." _; }
 
 kill_service() {
@@ -65,6 +67,11 @@ read_mode() {
 
 read_eu_ip() {
     cat "$EU_IP_FILE" 2>/dev/null || echo ""
+}
+
+# Включён ли локальный WARP (одиночный режим через socks5://127.0.0.1:40000)
+warp_enabled() {
+    [[ -f "$WARP_FILE" ]]
 }
 
 # Читает поле из строки clients.conf: <name>:<secret>:<port>:<sni>
@@ -156,6 +163,66 @@ install_mtg_binary() {
     echo "mtg установлен: $("$MTG_BIN" --version 2>&1 | head -1)"
 }
 
+# ─── Установка WARP (локально, для одиночного режима) ─────────────────────────
+install_warp() {
+    if command -v warp-cli &>/dev/null; then
+        echo "WARP уже установлен."
+        return 0
+    fi
+
+    echo "Устанавливаю Cloudflare WARP..."
+    apt-get install -y gnupg lsb-release > /dev/null 2>&1 || true
+
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+        > /etc/apt/sources.list.d/cloudflare-client.list
+
+    apt-get update -qq
+    apt-get install -y cloudflare-warp || die "Ошибка установки cloudflare-warp"
+    echo "WARP установлен."
+}
+
+# Регистрация + proxy-режим + подключение. Идемпотентно.
+configure_warp() {
+    local current_status
+    current_status=$(warp-cli status 2>/dev/null || echo "Unknown")
+
+    if echo "$current_status" | grep -q "Connected"; then
+        echo "WARP уже подключён."
+    else
+        if ! echo "$current_status" | grep -q "Registered"; then
+            echo "Регистрирую WARP..."
+            warp-cli registration new || die "Ошибка регистрации WARP"
+        fi
+        echo "Переключаю WARP в proxy-режим..."
+        warp-cli mode proxy || die "Ошибка переключения WARP в proxy-режим"
+        echo "Подключаю WARP..."
+        warp-cli connect || die "Ошибка подключения WARP"
+    fi
+
+    # Ждём, пока SOCKS5 на 127.0.0.1:40000 поднимется
+    echo "Ожидаю WARP proxy на ${WARP_SOCKS}..."
+    local attempts=0
+    while (( attempts < 15 )); do
+        if ss -lntp 2>/dev/null | grep -q "${WARP_SOCKS}"; then
+            echo "WARP proxy слушает на ${WARP_SOCKS}."
+            return 0
+        fi
+        sleep 2
+        (( attempts++ ))
+    done
+    die "WARP proxy не слушает на ${WARP_SOCKS} за 30 секунд. Проверьте: warp-cli status"
+}
+
+# Включает локальный WARP: ставит, настраивает, поднимает флаг.
+enable_warp() {
+    install_warp
+    configure_warp
+    touch "$WARP_FILE"
+    echo "Локальный WARP включён."
+}
+
 # ─── Генерация конфига toml ───────────────────────────────────────────────────
 write_toml() {
     local name="$1" secret="$2" port="$3"
@@ -173,6 +240,23 @@ tolerate-time-skewness = "5s"
 
 [network]
 proxies = ["socks5://${eu_ip}:1080"]
+
+[defense.anti-replay]
+enabled = true
+max-size = "1mib"
+error-rate = 0.001
+
+[defense.doppelganger]
+drs = true
+EOF
+    elif warp_enabled; then
+        cat > "$toml_path" <<EOF
+secret = "$secret"
+bind-to = "0.0.0.0:$port"
+tolerate-time-skewness = "5s"
+
+[network]
+proxies = ["socks5://${WARP_SOCKS}"]
 
 [defense.anti-replay]
 enabled = true
@@ -558,12 +642,50 @@ remove_all() {
         done < "$CLIENTS_CONF"
     fi
 
+    # Если был локальный WARP — отключаем (сам пакет оставляем на месте)
+    if [[ -f "$WARP_FILE" ]] && command -v warp-cli &>/dev/null; then
+        warp-cli disconnect 2>/dev/null || true
+    fi
+
     rm -f "$MTG_BIN"
     rm -f /usr/local/bin/vi-mtpro
     rm -f /usr/local/lib/vi-mtpro.sh
     rm -rf "$MTG_DIR"
     echo "Удалено."
     exit 0
+}
+
+# Перезаписывает toml всех клиентов и перезапускает их сервисы.
+rewrite_all_clients() {
+    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname csecret cport
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        write_toml "$cname" "$csecret" "$cport"
+        kill_service "mtg-${cname}"
+        systemctl start "mtg-${cname}" 2>/dev/null || true
+    done < "$CLIENTS_CONF"
+}
+
+# Включить / выключить локальный WARP в одиночном режиме.
+toggle_warp() {
+    if warp_enabled; then
+        read -rp "Отключить локальный WARP? Трафик пойдёт напрямую. [y/N]: " confirm
+        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
+        rm -f "$WARP_FILE"
+        command -v warp-cli &>/dev/null && warp-cli disconnect 2>/dev/null || true
+        rewrite_all_clients
+        echo "Локальный WARP отключён."
+    else
+        read -rp "Включить локальный WARP (трафик в Telegram через Cloudflare WARP)? [y/N]: " confirm
+        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
+        enable_warp
+        rewrite_all_clients
+        echo "Локальный WARP включён."
+    fi
 }
 
 manage_menu() {
@@ -581,7 +703,12 @@ manage_menu() {
             echo "5) Отвязать EU-сервер"
             echo "6) Удалить всё"
         else
-            echo "4) Удалить всё"
+            if warp_enabled; then
+                echo "4) Локальный WARP: ВКЛ (выключить)"
+            else
+                echo "4) Локальный WARP: ВЫКЛ (включить)"
+            fi
+            echo "5) Удалить всё"
         fi
         echo "0) Назад"
         echo ""
@@ -595,14 +722,14 @@ manage_menu() {
                 if [[ "$mode" == "cascade" ]]; then
                     bind_eu_server; pause
                 else
-                    remove_all
+                    toggle_warp; pause
                 fi
                 ;;
             5)
                 if [[ "$mode" == "cascade" ]]; then
                     unbind_eu_server; pause
                 else
-                    echo "Неверный выбор."; sleep 1
+                    remove_all
                 fi
                 ;;
             6)
@@ -631,11 +758,18 @@ setup_single() {
     touch "$CLIENTS_CONF"
 
     echo ""
+    local use_warp
+    read -rp "Использовать локальный WARP (трафик в Telegram через Cloudflare WARP)? [y/N]: " use_warp
+    if [[ "$use_warp" == "y" || "$use_warp" == "Y" ]]; then
+        enable_warp
+    fi
+
+    echo ""
     echo "Создаём первого клиента:"
     add_client "default"
 
     echo ""
-    echo "Установка завершена. Режим: одиночный."
+    echo "Установка завершена. Режим: одиночный$(warp_enabled && echo " + WARP")."
     echo "Для управления используйте команду: vi-mtpro"
 }
 
