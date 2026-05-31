@@ -31,6 +31,9 @@ SNI_LIST=(
     "www.rambler.ru"
 )
 
+# Порты, типичные для HTTPS/TLS-сервисов — меньше выделяются для DPI.
+HTTPS_PORTS=(443 8443 2053 2083 2087 2096)
+
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
@@ -85,6 +88,31 @@ iter_clients() {
 client_exists() {
     local name="$1"
     grep -q "^${name}:" "$CLIENTS_CONF" 2>/dev/null
+}
+
+# Порт уже занят другим клиентом?
+port_in_use() {
+    local port="$1"
+    [[ -f "$CLIENTS_CONF" ]] || return 1
+    cut -d: -f3 "$CLIENTS_CONF" 2>/dev/null | grep -qx "$port"
+}
+
+# Случайный свободный порт из HTTPS_PORTS; пусто, если все заняты.
+random_free_port() {
+    # Перебираем порты в случайном порядке, возвращаем первый свободный.
+    local ports=("${HTTPS_PORTS[@]}")
+    local n=${#ports[@]} i j tmp
+    for (( i = n - 1; i > 0; i-- )); do
+        j=$(( RANDOM % (i + 1) ))
+        tmp="${ports[i]}"; ports[i]="${ports[j]}"; ports[j]="$tmp"
+    done
+    for p in "${ports[@]}"; do
+        if ! port_in_use "$p"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # ─── Установка mtg ────────────────────────────────────────────────────────────
@@ -145,14 +173,32 @@ write_toml() {
         cat > "$toml_path" <<EOF
 secret = "$secret"
 bind-to = "0.0.0.0:$port"
+tolerate-time-skewness = "5s"
 
 [network]
 proxies = ["socks5://${eu_ip}:1080"]
+
+[defense.anti-replay]
+enabled = true
+max-size = "1mib"
+error-rate = 0.001
+
+[defense.doppelganger]
+drs = true
 EOF
     else
         cat > "$toml_path" <<EOF
 secret = "$secret"
 bind-to = "0.0.0.0:$port"
+tolerate-time-skewness = "5s"
+
+[defense.anti-replay]
+enabled = true
+max-size = "1mib"
+error-rate = 0.001
+
+[defense.doppelganger]
+drs = true
 EOF
     fi
 }
@@ -204,18 +250,26 @@ add_client() {
         return 1
     fi
 
-    # Порт
+    # Порт. Enter → случайный свободный порт из HTTPS-диапазона.
     local port
-    read -rp "Введите порт [по умолчанию: 443]: " port
-    port="${port:-443}"
+    read -rp "Введите порт [Enter — случайный HTTPS-порт]: " port
+    if [[ -z "$port" ]]; then
+        port=$(random_free_port) || { echo "Все HTTPS-порты заняты, введите порт вручную."; return 1; }
+        echo "Выбран случайный порт: $port"
+    fi
     if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
         echo "Некорректный порт."
         return 1
     fi
+    if port_in_use "$port"; then
+        echo "Порт $port уже занят другим клиентом."
+        return 1
+    fi
 
-    # SNI
+    # SNI. Enter / 0 → случайный домен из списка.
     echo ""
-    echo "Выберите SNI-домен:"
+    echo "Выберите SNI-домен (Enter — случайный):"
+    echo "  0) Случайный из списка"
     local i=1
     for sni in "${SNI_LIST[@]}"; do
         printf " %2d) %-30s" "$i" "$sni"
@@ -227,8 +281,12 @@ add_client() {
     echo ""
 
     local sni_choice sni_domain
-    read -rp "Ваш выбор [1-21]: " sni_choice
-    if [[ "$sni_choice" == "21" ]]; then
+    read -rp "Ваш выбор [0-21]: " sni_choice
+    sni_choice="${sni_choice:-0}"
+    if [[ "$sni_choice" == "0" ]]; then
+        sni_domain="${SNI_LIST[$((RANDOM % ${#SNI_LIST[@]}))]}"
+        echo "Выбран случайный SNI: $sni_domain"
+    elif [[ "$sni_choice" == "21" ]]; then
         read -rp "Введите домен: " sni_domain
         if [[ -z "$sni_domain" || "$sni_domain" =~ [[:space:]] ]]; then
             echo "Некорректный домен."
