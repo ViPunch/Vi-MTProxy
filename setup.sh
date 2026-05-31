@@ -154,6 +154,56 @@ run_mtg_doctor() {
     "$MTG_BIN" doctor "$MTG_DIR/${name}.toml"
 }
 
+read_client_sni() {
+    local line="$1"
+    conf_field "$line" 4
+}
+
+read_client_type() {
+    local line="$1"
+    local ctype
+    ctype=$(conf_field "$line" 5)
+    if [[ "$ctype" == "managed" || "$ctype" == "external" ]]; then
+        echo "$ctype"
+        return 0
+    fi
+
+    local csni managed_domain
+    csni=$(read_client_sni "$line")
+    managed_domain=$(read_fronting_domain)
+    if [[ -n "$managed_domain" && "$csni" == "$managed_domain" ]]; then
+        echo "managed"
+    else
+        echo "external"
+    fi
+}
+
+write_client_record() {
+    local name="$1" secret="$2" port="$3" sni="$4" ctype="$5"
+    echo "${name}:${secret}:${port}:${sni}:${ctype}"
+}
+
+client_type_label() {
+    local ctype="$1"
+    if [[ "$ctype" == "managed" ]]; then
+        echo "Managed fronting"
+    else
+        echo "External FakeTLS"
+    fi
+}
+
+validate_client_runtime() {
+    local ctype="$1" sni="$2" port="$3"
+
+    if [[ "$ctype" == "managed" ]]; then
+        local managed_domain
+        managed_domain=$(read_fronting_domain)
+        [[ -n "$managed_domain" ]] || die "Managed client требует настроенный fronting domain"
+        [[ "$sni" == "$managed_domain" ]] || die "Managed client должен использовать fronting domain $managed_domain"
+        [[ "$port" != "443" ]] || die "Порт 443 зарезервирован под managed HTTPS и не может использоваться клиентом"
+    fi
+}
+
 secret_sni() {
     local secret="$1"
     local pad_len=$(( (4 - ${#secret} % 4) % 4 ))
@@ -177,16 +227,17 @@ replace_client_secret_for_sni() {
     tmpfile=$(mktemp)
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport csni new_secret embedded_sni
+        local cname csecret cport csni ctype new_secret embedded_sni
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
-        csni=$(conf_field "$line" 4)
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
         embedded_sni=$(secret_sni "$csecret")
 
-        if [[ "$csni" == "$old_sni" || "$embedded_sni" == "$old_sni" ]]; then
+        if [[ "$ctype" == "managed" ]] && [[ "$csni" == "$old_sni" || "$embedded_sni" == "$old_sni" ]]; then
             new_secret=$($MTG_BIN generate-secret "$new_sni" 2>/dev/null) || die "Ошибка генерации секрета для $new_sni"
-            echo "${cname}:${new_secret}:${cport}:${new_sni}" >> "$tmpfile"
+            echo "$(write_client_record "$cname" "$new_secret" "$cport" "$new_sni" "$ctype")" >> "$tmpfile"
             write_toml "$cname" "$new_secret" "$cport"
             kill_service "mtg-${cname}"
             systemctl start "mtg-${cname}" 2>/dev/null || true
@@ -205,16 +256,17 @@ sync_client_secret_for_sni() {
     tmpfile=$(mktemp)
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport csni new_secret embedded_sni
+        local cname csecret cport csni ctype new_secret embedded_sni
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
-        csni=$(conf_field "$line" 4)
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
         embedded_sni=$(secret_sni "$csecret")
 
-        if [[ "$csni" == "$target_sni" && "$embedded_sni" != "$target_sni" ]]; then
+        if [[ "$ctype" == "managed" && "$csni" == "$target_sni" && "$embedded_sni" != "$target_sni" ]]; then
             new_secret=$($MTG_BIN generate-secret "$target_sni" 2>/dev/null) || die "Ошибка генерации секрета для $target_sni"
-            echo "${cname}:${new_secret}:${cport}:${target_sni}" >> "$tmpfile"
+            echo "$(write_client_record "$cname" "$new_secret" "$cport" "$target_sni" "$ctype")" >> "$tmpfile"
             write_toml "$cname" "$new_secret" "$cport"
             kill_service "mtg-${cname}"
             systemctl start "mtg-${cname}" 2>/dev/null || true
@@ -260,30 +312,48 @@ setup_managed_fronting_domain() {
     echo "Managed fronting-домен настроен: $domain"
 }
 
-pick_client_sni() {
-    local managed_domain="$1"
-    local sni_choice sni_domain i
+ensure_runtime_client_consistency() {
+    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
 
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local cname cport csni ctype
+        cname=$(conf_field "$line" 1)
+        cport=$(conf_field "$line" 3)
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
+        validate_client_runtime "$ctype" "$csni" "$cport" || die "Неконсистентный клиент '$cname'"
+    done < "$CLIENTS_CONF"
+}
+
+pick_client_profile() {
+    local managed_domain="$1"
+    local mode_choice sni_choice sni_domain i
+
+    echo "" >&2
+    echo "Выберите режим клиента:" >&2
     if [[ -n "$managed_domain" ]]; then
+        echo "  1) Managed fronting domain: $managed_domain" >&2
+        echo "  2) External FakeTLS domain" >&2
         echo "" >&2
-        echo "Выберите режим SNI:" >&2
-        echo "  0) Managed domain (рекомендуется): $managed_domain" >&2
-        echo "  1) FakeTLS из списка / вручную" >&2
-        echo "" >&2
-        read -rp "Ваш выбор [0/1]: " sni_choice
-        sni_choice="${sni_choice:-0}"
-        if [[ "$sni_choice" == "0" ]]; then
-            echo "$managed_domain"
+        read -rp "Ваш выбор [1/2]: " mode_choice
+        mode_choice="${mode_choice:-1}"
+        if [[ "$mode_choice" == "1" ]]; then
+            echo "managed:$managed_domain"
             return 0
-        elif [[ "$sni_choice" != "1" ]]; then
-            echo "Некорректный выбор. Использую managed domain: $managed_domain" >&2
-            echo "$managed_domain"
-            return 0
+        elif [[ "$mode_choice" != "2" ]]; then
+            die "Некорректный выбор режима клиента."
         fi
+    else
+        echo "  1) External FakeTLS domain" >&2
+        echo "" >&2
+        read -rp "Ваш выбор [1]: " mode_choice
+        mode_choice="${mode_choice:-1}"
+        [[ "$mode_choice" == "1" ]] || die "Managed fronting сначала нужно настроить отдельно."
     fi
 
     echo "" >&2
-    echo "Выберите SNI-домен (Enter — случайный):" >&2
+    echo "Выберите внешний FakeTLS-домен (Enter — случайный):" >&2
     echo "  0) Случайный из списка" >&2
     i=1
     for sni in "${SNI_LIST[@]}"; do
@@ -311,7 +381,7 @@ pick_client_sni() {
         die "Некорректный выбор."
     fi
 
-    echo "$sni_domain"
+    echo "external:$sni_domain"
 }
 
 read_mode() {
@@ -327,7 +397,7 @@ warp_enabled() {
     [[ -f "$WARP_FILE" ]]
 }
 
-# Читает поле из строки clients.conf: <name>:<secret>:<port>:<sni>
+# Читает поле из строки clients.conf: <name>:<secret>:<port>:<sni>[:<type>]
 conf_field() {
     local line="$1" field="$2"
     echo "$line" | cut -d: -f"$field"
@@ -628,8 +698,11 @@ add_client() {
         return 1
     fi
 
-    local sni_domain
-    sni_domain=$(pick_client_sni "$managed_domain")
+    local client_profile client_type sni_domain
+    client_profile=$(pick_client_profile "$managed_domain")
+    client_type=${client_profile%%:*}
+    sni_domain=${client_profile#*:}
+    validate_client_runtime "$client_type" "$sni_domain" "$port"
 
     # Генерация секрета
     echo "Генерирую секрет..."
@@ -643,7 +716,7 @@ add_client() {
 
     # Сохранение
     mkdir -p "$MTG_DIR"
-    echo "${name}:${secret}:${port}:${sni_domain}" >> "$CLIENTS_CONF"
+    write_client_record "$name" "$secret" "$port" "$sni_domain" "$client_type" >> "$CLIENTS_CONF"
 
     write_toml "$name" "$secret" "$port"
     write_service "$name"
@@ -665,7 +738,7 @@ add_client() {
     local public_ip
     public_ip=$(get_public_ip)
     echo ""
-    echo "Клиент $name создан."
+    echo "Клиент $name создан. Тип: $(client_type_label "$client_type")."
     echo "tg://proxy?server=${public_ip}&port=${port}&secret=${secret}"
     echo ""
 }
@@ -676,16 +749,17 @@ list_clients() {
         echo "Клиентов нет."
         return
     fi
-    printf "\n%-3s %-20s %-8s %s\n" "#" "Имя" "Порт" "Секрет"
-    printf "%-3s %-20s %-8s %s\n" "---" "--------------------" "--------" "------"
+    printf "\n%-3s %-20s %-8s %-18s %s\n" "#" "Имя" "Порт" "Тип" "Секрет"
+    printf "%-3s %-20s %-8s %-18s %s\n" "---" "--------------------" "--------" "------------------" "------"
     local i=1
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname cport csecret
+        local cname cport csecret ctype
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
-        printf "%-3s %-20s %-8s %s\n" "$i" "$cname" "$cport" "${csecret:0:16}..."
+        ctype=$(read_client_type "$line")
+        printf "%-3s %-20s %-8s %-18s %s\n" "$i" "$cname" "$cport" "$ctype" "${csecret:0:16}..."
         (( i++ ))
     done < "$CLIENTS_CONF"
     echo ""
@@ -758,12 +832,13 @@ show_links() {
     echo ""
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport csni
+        local cname csecret cport csni ctype
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
-        csni=$(conf_field "$line" 4)
-        echo "Клиент: $cname  SNI: $csni"
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
+        echo "Клиент: $cname  Тип: $(client_type_label "$ctype")  SNI: $csni"
         echo "tg://proxy?server=${public_ip}&port=${cport}&secret=${csecret}"
         echo ""
     done < "$CLIENTS_CONF"
@@ -777,10 +852,16 @@ show_status() {
     fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname
+        local cname csni ctype cport
         cname=$(conf_field "$line" 1)
+        cport=$(conf_field "$line" 3)
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
         echo ""
         echo "--- mtg-${cname} ---"
+        echo "Тип: $(client_type_label "$ctype")"
+        echo "SNI: $csni"
+        validate_client_runtime "$ctype" "$csni" "$cport" 2>/dev/null || true
         systemctl status "mtg-${cname}" --no-pager -l 2>/dev/null || echo "Сервис не найден."
         echo ""
         echo "doctor:"
@@ -857,6 +938,7 @@ bind_eu_server() {
         return 0
     fi
 
+    ensure_runtime_client_consistency
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname csecret cport
@@ -880,6 +962,7 @@ unbind_eu_server() {
         return 0
     fi
 
+    ensure_runtime_client_consistency
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname csecret cport
@@ -928,6 +1011,7 @@ remove_all() {
 # Перезаписывает toml всех клиентов и перезапускает их сервисы.
 rewrite_all_clients() {
     [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
+    ensure_runtime_client_consistency
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname csecret cport
@@ -1038,7 +1122,7 @@ setup_single() {
 
     echo ""
     local use_managed_domain
-    read -rp "Настроить managed fronting-домен с автоматическим HTTPS? [Y/n]: " use_managed_domain
+    read -rp "Настроить Managed fronting domain с автоматическим HTTPS? [Y/n]: " use_managed_domain
     if [[ -z "$use_managed_domain" || "$use_managed_domain" == "y" || "$use_managed_domain" == "Y" ]]; then
         setup_managed_fronting_domain
     fi
@@ -1077,7 +1161,7 @@ setup_cascade() {
 
     echo ""
     local use_managed_domain
-    read -rp "Настроить managed fronting-домен с автоматическим HTTPS? [Y/n]: " use_managed_domain
+    read -rp "Настроить Managed fronting domain с автоматическим HTTPS? [Y/n]: " use_managed_domain
     if [[ -z "$use_managed_domain" || "$use_managed_domain" == "y" || "$use_managed_domain" == "Y" ]]; then
         setup_managed_fronting_domain
     fi
@@ -1128,6 +1212,7 @@ switch_mode() {
 
         # Перезаписываем toml для всех клиентов
         if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
+            ensure_runtime_client_consistency
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
                 local cname csecret cport
@@ -1168,7 +1253,7 @@ main_menu() {
         echo "=== MTProxy Setup ==="
         echo "Режим: $mode_label"
         if [[ -n "$fronting_domain" ]]; then
-            echo "Managed domain: $fronting_domain"
+            echo "Managed fronting domain: $fronting_domain"
         fi
         echo "---"
         echo "1) Управление клиентами (добавить / список / удалить)"
@@ -1233,6 +1318,7 @@ if [[ $# -ge 2 && "$1" == "set-eu" ]]; then
     echo "cascade" > "$MODE_FILE"
 
     if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
+        ensure_runtime_client_consistency
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local cname csecret cport
