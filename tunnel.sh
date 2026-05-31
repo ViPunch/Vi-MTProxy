@@ -139,6 +139,7 @@ configure_warp() {
 
     # Проверяем текущий статус
     local current_status
+    local registration_output
     current_status=$(warp-cli status 2>/dev/null || echo "Unknown")
     echo "Текущий статус WARP: $current_status"
 
@@ -152,8 +153,16 @@ configure_warp() {
     if ! echo "$current_status" | grep -q "Registered"; then
         echo "Регистрирую WARP..."
         log "Регистрация WARP..."
-        warp-cli registration new || die "Ошибка регистрации WARP"
-        echo "WARP зарегистрирован"
+        registration_output=$(warp-cli registration new 2>&1) || true
+        if echo "$registration_output" | grep -q "Success"; then
+            echo "WARP зарегистрирован"
+        elif echo "$registration_output" | grep -q "Old registration is still around"; then
+            echo "WARP уже зарегистрирован"
+            log "WARP уже зарегистрирован"
+        else
+            echo "$registration_output"
+            die "Ошибка регистрации WARP"
+        fi
     else
         echo "WARP уже зарегистрирован"
     fi

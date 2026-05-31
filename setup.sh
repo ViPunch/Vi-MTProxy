@@ -389,6 +389,7 @@ install_warp() {
 # Регистрация + proxy-режим + подключение. Идемпотентно.
 configure_warp() {
     local current_status
+    local registration_output
     current_status=$(warp-cli status 2>/dev/null || echo "Unknown")
 
     if echo "$current_status" | grep -q "Connected"; then
@@ -396,7 +397,15 @@ configure_warp() {
     else
         if ! echo "$current_status" | grep -q "Registered"; then
             echo "Регистрирую WARP..."
-            warp-cli registration new || die "Ошибка регистрации WARP"
+            registration_output=$(warp-cli registration new 2>&1) || true
+            if echo "$registration_output" | grep -q "Success"; then
+                :
+            elif echo "$registration_output" | grep -q "Old registration is still around"; then
+                echo "WARP уже зарегистрирован, пропускаю повторную регистрацию."
+            else
+                echo "$registration_output"
+                die "Ошибка регистрации WARP"
+            fi
         fi
         echo "Переключаю WARP в proxy-режим..."
         warp-cli mode proxy || die "Ошибка переключения WARP в proxy-режим"
