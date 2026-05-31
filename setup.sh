@@ -303,6 +303,11 @@ port_in_use() {
     cut -d: -f3 "$CLIENTS_CONF" 2>/dev/null | grep -qx "$port"
 }
 
+system_port_in_use() {
+    local port="$1"
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[\[\]:])${port}$"
+}
+
 # Случайный свободный порт из HTTPS_PORTS; пусто, если все заняты.
 random_free_port() {
     # Перебираем порты в случайном порядке, возвращаем первый свободный.
@@ -313,7 +318,7 @@ random_free_port() {
         tmp="${ports[i]}"; ports[i]="${ports[j]}"; ports[j]="$tmp"
     done
     for p in "${ports[@]}"; do
-        if ! port_in_use "$p"; then
+        if ! port_in_use "$p" && ! system_port_in_use "$p"; then
             echo "$p"
             return 0
         fi
@@ -566,6 +571,10 @@ add_client() {
     fi
     if port_in_use "$port"; then
         echo "Порт $port уже занят другим клиентом."
+        return 1
+    fi
+    if system_port_in_use "$port"; then
+        echo "Порт $port уже занят другим сервисом на сервере."
         return 1
     fi
 
