@@ -5,7 +5,7 @@
 ---
 
 <a name="english"></a>
-# Vi-MTPro (Docker + Cascade + WARP) — English
+# Vi-MTPro (Cascade + WARP) — English
 
 A quick installation of MTProxy in Docker containers with cascade support via WARP and masquerading as a normal HTTPS site.
 
