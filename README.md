@@ -103,6 +103,17 @@ The script will install WARP and gost, and start a SOCKS5 tunnel on port 1080. A
 
 ---
 
+## Support the Project
+
+If this project was helpful to you, you can support its development:
+
+- **DonationAlerts**: [https://www.donationalerts.com/r/vipunch](https://www.donationalerts.com/r/vipunch)
+- **BTC**: `12tSjndfTjfttXsckBqQwbrZZADWbEeiLi`
+- **USDT (ERC20)**: `0xeff9305f8f48261c3f4b3990306bece26788a04c`
+- **USDT (TRC20)**: `TCVzqHNmYq9KZRbH3GcZgWNnQeet1hFckp`
+
+---
+
 <a name="русский"></a>
 # Vi-MTPro (Docker + Cascade + WARP)
 
@@ -200,3 +211,14 @@ bash <(curl -sSL https://raw.githubusercontent.com/ViPunch/Vi-MTProxy/master/tun
 - Root-доступ
 - Docker (устанавливается автоматически)
 - Для managed fronting-domain: домен должен заранее резолвиться в IP вашего сервера
+
+---
+
+## Поддержка проекта
+
+Если проект оказался для вас полезным, вы можете поддержать его разработку:
+
+- **DonationAlerts**: [https://www.donationalerts.com/r/vipunch](https://www.donationalerts.com/r/vipunch)
+- **BTC**: `12tSjndfTjfttXsckBqQwbrZZADWbEeiLi`
+- **USDT (ERC20)**: `0xeff9305f8f48261c3f4b3990306bece26788a04c`
+- **USDT (TRC20)**: `TCVzqHNmYq9KZRbH3GcZgWNnQeet1hFckp`
