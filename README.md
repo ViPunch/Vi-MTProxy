@@ -1,4 +1,4 @@
-# Vi-MTPro (Docker + Cascade + WARP)
+# Vi-MTPro (Cascade + WARP)
 
 [🇬🇧 English](#english) | [🇷🇺 Русский](#русский)
 
