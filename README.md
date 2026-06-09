@@ -1,4 +1,4 @@
-# Vi-MTPro (Cascade + WARP)
+# Vi-MTProxy (Cascade + WARP)
 
 [🇬🇧 English](#english) | [🇷🇺 Русский](#русский)
 
