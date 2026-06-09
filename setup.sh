@@ -3,13 +3,15 @@ set -euo pipefail
 
 # ─── Константы ────────────────────────────────────────────────────────────────
 MTG_DIR="/etc/mtg"
-MTG_BIN="/usr/local/bin/mtg"
+MTG_IMAGE="nineseconds/mtg:2"
 CLIENTS_CONF="$MTG_DIR/clients.conf"
 MODE_FILE="$MTG_DIR/mode"
 EU_IP_FILE="$MTG_DIR/eu_ip"
 FRONTING_DOMAIN_FILE="$MTG_DIR/fronting_domain"
-WARP_FILE="$MTG_DIR/warp"          # флаг: локальный WARP включён (одиночный режим)
-WARP_SOCKS="127.0.0.1:40000"       # SOCKS5 от WARP в proxy-режиме
+EMAIL_FILE="$MTG_DIR/email"
+WARP_FILE="$MTG_DIR/warp"
+SITE_OWN_FILE="$MTG_DIR/site_own"
+WARP_SOCKS="127.0.0.1:40000"
 
 SNI_LIST=(
     "www.google.com"
@@ -34,36 +36,39 @@ SNI_LIST=(
     "www.rambler.ru"
 )
 
-# Порты, типичные для HTTPS/TLS-сервисов — меньше выделяются для DPI.
 HTTPS_PORTS=(443 8443 2053 2083 2087 2096)
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
-
-# Терминал не очищаем — меню просто печатается следующим блоком,
-# чтобы весь предыдущий вывод (ссылки и т.д.) оставался на экране.
 menu_clear() { echo ""; }
 pause() { read -rp "Нажмите Enter для продолжения..." _; }
-
-kill_service() {
-    local svc="$1"
-    # Находим PID и убиваем напрямую
-    local pid
-    pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
-    if [[ -n "$pid" && "$pid" != "0" ]]; then
-        kill -9 "$pid" 2>/dev/null || true
-        sleep 0.5
-    fi
-    systemctl reset-failed "$svc" 2>/dev/null || true
-    systemctl stop "$svc" 2>/dev/null || true
-}
 
 get_public_ip() {
     curl -s --max-time 5 https://api.ipify.org || echo "UNKNOWN"
 }
 
+get_local_ip() {
+    ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || get_public_ip
+}
+
 read_fronting_domain() {
     cat "$FRONTING_DOMAIN_FILE" 2>/dev/null || echo ""
+}
+
+read_mode() {
+    cat "$MODE_FILE" 2>/dev/null || echo ""
+}
+
+read_eu_ip() {
+    cat "$EU_IP_FILE" 2>/dev/null || echo ""
+}
+
+warp_enabled() {
+    [[ -f "$WARP_FILE" ]]
+}
+
+site_is_own() {
+    [[ -f "$SITE_OWN_FILE" ]]
 }
 
 is_valid_domain() {
@@ -81,77 +86,101 @@ domain_points_to_ip() {
     resolve_domain_ipv4 "$domain" | grep -qx "$expected_ip"
 }
 
-set_server_hostname() {
+conf_field() {
+    local line="$1" field="$2"
+    echo "$line" | cut -d: -f"$field"
+}
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+pull_mtg_image() {
+    echo "Загружаю Docker-образ $MTG_IMAGE..."
+    docker pull "$MTG_IMAGE" || die "Ошибка загрузки Docker-образа $MTG_IMAGE"
+    echo "Образ загружен."
+}
+
+generate_secret() {
     local domain="$1"
-    local public_ip
-    public_ip=$(get_public_ip)
-    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
-
-    hostnamectl set-hostname "$domain"
-    cat > /etc/hosts <<EOF
-127.0.0.1 localhost
-127.0.1.1 localhost.localdomain
-
-# The following lines are desirable for IPv6 capable hosts
-::1     ip6-localhost ip6-loopback
-fe00::0 ip6-localnet
-ff00::0 ip6-mcastprefix
-ff02::1 ip6-allnodes
-ff02::2 ip6-allrouters
-$public_ip $domain ${domain%%.*}
-EOF
+    docker run --rm "$MTG_IMAGE" generate-secret --hex "$domain" 2>/dev/null
 }
 
-install_https_dependencies() {
-    apt-get install -y nginx certbot python3-certbot-nginx || die "Ошибка установки nginx/certbot"
+start_container() {
+    local name="$1"
+    docker run -d \
+        --name "mtg-${name}" \
+        --restart always \
+        --network host \
+        -v "$MTG_DIR/${name}.toml:/config.toml:ro" \
+        "$MTG_IMAGE" run /config.toml >/dev/null \
+        || die "Ошибка запуска контейнера mtg-${name}"
 }
 
-configure_nginx_fronting() {
-    local domain="$1"
-    mkdir -p /var/www/vi-mtpro-fronting
-    cat > /var/www/vi-mtpro-fronting/index.html <<EOF
-<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>$domain</title></head>
-<body><h1>$domain</h1><p>HTTPS fronting is ready.</p></body>
-</html>
-EOF
-
-    cat > /etc/nginx/sites-available/vi-mtpro-fronting.conf <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $domain;
-
-    root /var/www/vi-mtpro-fronting;
-    index index.html;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-}
-EOF
-
-    ln -sf /etc/nginx/sites-available/vi-mtpro-fronting.conf /etc/nginx/sites-enabled/vi-mtpro-fronting.conf
-    rm -f /etc/nginx/sites-enabled/default
-    nginx -t || die "Конфиг nginx не прошёл проверку"
-    systemctl enable --now nginx || die "Не удалось запустить nginx"
-    systemctl reload nginx || die "Не удалось перезагрузить nginx"
+stop_container() {
+    local name="$1"
+    docker rm -f "mtg-${name}" 2>/dev/null || true
 }
 
-ensure_https_certificate() {
-    local domain="$1"
-    certbot --nginx \
-        --non-interactive \
-        --agree-tos \
-        --register-unsafely-without-email \
-        -d "$domain" || die "Не удалось выпустить Let's Encrypt сертификат для $domain"
-    systemctl reload nginx || die "Не удалось перезагрузить nginx после certbot"
+restart_container() {
+    local name="$1"
+    stop_container "$name"
+    start_container "$name"
+}
+
+container_running() {
+    local name="$1"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "mtg-${name}"
 }
 
 run_mtg_doctor() {
     local name="$1"
-    "$MTG_BIN" doctor "$MTG_DIR/${name}.toml"
+    docker run --rm --network host \
+        -v "$MTG_DIR/${name}.toml:/config.toml:ro" \
+        "$MTG_IMAGE" doctor /config.toml
+}
+
+# ─── Конфиг клиентов ──────────────────────────────────────────────────────────
+iter_clients() {
+    [[ -f "$CLIENTS_CONF" ]] || return 0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "$line"
+    done < "$CLIENTS_CONF"
+}
+
+client_exists() {
+    local name="$1"
+    grep -q "^${name}:" "$CLIENTS_CONF" 2>/dev/null
+}
+
+port_in_use() {
+    local port="$1"
+    [[ -f "$CLIENTS_CONF" ]] || return 1
+    cut -d: -f3 "$CLIENTS_CONF" 2>/dev/null | grep -qx "$port"
+}
+
+system_port_in_use() {
+    local port="$1"
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[[\]:])${port}$"
+}
+
+random_free_port() {
+    local ports=("${HTTPS_PORTS[@]}")
+    local n=${#ports[@]} i j tmp
+    for (( i = n - 1; i > 0; i-- )); do
+        j=$(( RANDOM % (i + 1) ))
+        tmp="${ports[i]}"; ports[i]="${ports[j]}"; ports[j]="$tmp"
+    done
+    for p in "${ports[@]}"; do
+        if ! port_in_use "$p" && ! system_port_in_use "$p"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+write_client_record() {
+    local name="$1" secret="$2" port="$3" sni="$4" ctype="$5"
+    echo "${name}:${secret}:${port}:${sni}:${ctype}"
 }
 
 read_client_sni() {
@@ -167,7 +196,6 @@ read_client_type() {
         echo "$ctype"
         return 0
     fi
-
     local csni managed_domain
     csni=$(read_client_sni "$line")
     managed_domain=$(read_fronting_domain)
@@ -178,11 +206,6 @@ read_client_type() {
     fi
 }
 
-write_client_record() {
-    local name="$1" secret="$2" port="$3" sni="$4" ctype="$5"
-    echo "${name}:${secret}:${port}:${sni}:${ctype}"
-}
-
 client_type_label() {
     local ctype="$1"
     if [[ "$ctype" == "managed" ]]; then
@@ -190,140 +213,6 @@ client_type_label() {
     else
         echo "External FakeTLS"
     fi
-}
-
-validate_client_runtime() {
-    local ctype="$1" sni="$2" port="$3"
-
-    if [[ "$ctype" == "managed" ]]; then
-        local managed_domain
-        managed_domain=$(read_fronting_domain)
-        [[ -n "$managed_domain" ]] || die "Managed client требует настроенный fronting domain"
-        [[ "$sni" == "$managed_domain" ]] || die "Managed client должен использовать fronting domain $managed_domain"
-        [[ "$port" != "443" ]] || die "Порт 443 зарезервирован под managed HTTPS и не может использоваться клиентом"
-    fi
-}
-
-secret_sni() {
-    local secret="$1"
-    local pad_len=$(( (4 - ${#secret} % 4) % 4 ))
-    local padded="$secret"
-    local i
-    for (( i = 0; i < pad_len; i++ )); do
-        padded+="="
-    done
-
-    printf '%s' "$padded" \
-        | tr '_-' '/+' \
-        | base64 -d 2>/dev/null \
-        | tail -c +18 2>/dev/null || true
-}
-
-replace_client_secret_for_sni() {
-    local old_sni="$1" new_sni="$2"
-    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
-
-    local tmpfile
-    tmpfile=$(mktemp)
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname csecret cport csni ctype new_secret embedded_sni
-        cname=$(conf_field "$line" 1)
-        csecret=$(conf_field "$line" 2)
-        cport=$(conf_field "$line" 3)
-        csni=$(read_client_sni "$line")
-        ctype=$(read_client_type "$line")
-        embedded_sni=$(secret_sni "$csecret")
-
-        if [[ "$ctype" == "managed" ]] && [[ "$csni" == "$old_sni" || "$embedded_sni" == "$old_sni" ]]; then
-            new_secret=$($MTG_BIN generate-secret "$new_sni" 2>/dev/null) || die "Ошибка генерации секрета для $new_sni"
-            echo "$(write_client_record "$cname" "$new_secret" "$cport" "$new_sni" "$ctype")" >> "$tmpfile"
-            write_toml "$cname" "$new_secret" "$cport"
-            kill_service "mtg-${cname}"
-            systemctl start "mtg-${cname}" 2>/dev/null || true
-        else
-            echo "$line" >> "$tmpfile"
-        fi
-    done < "$CLIENTS_CONF"
-    mv "$tmpfile" "$CLIENTS_CONF"
-}
-
-sync_client_secret_for_sni() {
-    local target_sni="$1"
-    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
-
-    local tmpfile changed=false
-    tmpfile=$(mktemp)
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname csecret cport csni ctype new_secret embedded_sni
-        cname=$(conf_field "$line" 1)
-        csecret=$(conf_field "$line" 2)
-        cport=$(conf_field "$line" 3)
-        csni=$(read_client_sni "$line")
-        ctype=$(read_client_type "$line")
-        embedded_sni=$(secret_sni "$csecret")
-
-        if [[ "$ctype" == "managed" && "$csni" == "$target_sni" && "$embedded_sni" != "$target_sni" ]]; then
-            new_secret=$($MTG_BIN generate-secret "$target_sni" 2>/dev/null) || die "Ошибка генерации секрета для $target_sni"
-            echo "$(write_client_record "$cname" "$new_secret" "$cport" "$target_sni" "$ctype")" >> "$tmpfile"
-            write_toml "$cname" "$new_secret" "$cport"
-            kill_service "mtg-${cname}"
-            systemctl start "mtg-${cname}" 2>/dev/null || true
-            changed=true
-        else
-            echo "$line" >> "$tmpfile"
-        fi
-    done < "$CLIENTS_CONF"
-    mv "$tmpfile" "$CLIENTS_CONF"
-
-    if [[ "$changed" == true ]]; then
-        echo "Обновлены client secrets для managed domain: $target_sni"
-    fi
-}
-
-setup_managed_fronting_domain() {
-    local current_domain="${1:-$(read_fronting_domain)}"
-    local public_ip domain
-    public_ip=$(get_public_ip)
-    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
-
-    echo ""
-    if [[ -n "$current_domain" ]]; then
-        echo "Текущий managed domain: $current_domain"
-    fi
-    read -rp "Введите fronting-домен, уже указывающий на этот сервер: " domain
-    domain="${domain,,}"
-    [[ -z "$domain" ]] && die "Домен не может быть пустым"
-    is_valid_domain "$domain" || die "Некорректный домен"
-    domain_points_to_ip "$domain" "$public_ip" || die "Домен $domain должен резолвиться в $public_ip до продолжения"
-
-    set_server_hostname "$domain"
-    install_https_dependencies
-    configure_nginx_fronting "$domain"
-    ensure_https_certificate "$domain"
-
-    echo "$domain" > "$FRONTING_DOMAIN_FILE"
-    if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
-        replace_client_secret_for_sni "$current_domain" "$domain"
-    fi
-    sync_client_secret_for_sni "$domain"
-
-    echo "Managed fronting-домен настроен: $domain"
-}
-
-ensure_runtime_client_consistency() {
-    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
-
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname cport csni ctype
-        cname=$(conf_field "$line" 1)
-        cport=$(conf_field "$line" 3)
-        csni=$(read_client_sni "$line")
-        ctype=$(read_client_type "$line")
-        validate_client_runtime "$ctype" "$csni" "$cport" || die "Неконсистентный клиент '$cname'"
-    done < "$CLIENTS_CONF"
 }
 
 pick_client_profile() {
@@ -384,114 +273,214 @@ pick_client_profile() {
     echo "external:$sni_domain"
 }
 
-read_mode() {
-    cat "$MODE_FILE" 2>/dev/null || echo ""
+# ─── Nginx & SSL ──────────────────────────────────────────────────────────────
+install_web_dependencies() {
+    apt-get install -y nginx certbot python3-certbot-nginx || die "Ошибка установки nginx/certbot"
 }
 
-read_eu_ip() {
-    cat "$EU_IP_FILE" 2>/dev/null || echo ""
+create_stub_page() {
+    local tpl_choice="$1"
+    mkdir -p /var/www/html
+
+    case "$tpl_choice" in
+        1)
+            cat > /var/www/html/index.html <<'STUBEOF'
+<!DOCTYPE html>
+<html>
+<head>
+<title>Under Construction</title>
+<style>
+  body { background: #121212; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  .loader { border: 4px solid #333; border-top: 4px solid #3498db; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  h1 { font-weight: 300; }
+</style>
+</head>
+<body>
+  <div class="loader"></div>
+  <h1>System Update in Progress...</h1>
+</body>
+</html>
+STUBEOF
+            ;;
+        2)
+            cat > /var/www/html/index.html <<'STUBEOF'
+<!DOCTYPE html>
+<html>
+<head>
+<title>Maintenance</title>
+<style>
+  body { background: #0f172a; color: #cbd5e1; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  .pulse { width: 60px; height: 60px; background-color: #3b82f6; border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; margin-bottom: 30px; }
+  @keyframes pulse { 0% { transform: scale(0.8); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(59, 130, 246, 0); } 100% { transform: scale(0.8); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); } }
+  h1 { font-weight: 400; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+  <div class="pulse"></div>
+  <h1>Service Maintenance</h1>
+</body>
+</html>
+STUBEOF
+            ;;
+        *)
+            cat > /var/www/html/index.html <<'STUBEOF'
+<!DOCTYPE html>
+<html>
+<head>
+<title>Loading</title>
+<style>
+  body { background: #18181b; color: #e4e4e7; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  .progress-container { width: 300px; height: 4px; background: #3f3f46; border-radius: 2px; overflow: hidden; margin-bottom: 20px; }
+  .progress-bar { width: 50%; height: 100%; background: #10b981; animation: progress 2s infinite ease-in-out; transform-origin: left; }
+  @keyframes progress { 0% { transform: scaleX(0); } 50% { transform: scaleX(1); } 100% { transform: scaleX(0); transform-origin: right; } }
+  h1 { font-size: 1.2rem; text-transform: uppercase; letter-spacing: 2px; }
+</style>
+</head>
+<body>
+  <div class="progress-container"><div class="progress-bar"></div></div>
+  <h1>Initializing environment...</h1>
+</body>
+</html>
+STUBEOF
+            ;;
+    esac
 }
 
-# Включён ли локальный WARP (одиночный режим через socks5://127.0.0.1:40000)
-warp_enabled() {
-    [[ -f "$WARP_FILE" ]]
+set_server_hostname() {
+    local domain="$1"
+    local public_ip
+    public_ip=$(get_public_ip)
+    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
+
+    hostnamectl set-hostname "$domain"
+    cat > /etc/hosts <<EOF
+127.0.0.1 localhost
+127.0.1.1 localhost.localdomain
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+$public_ip $domain ${domain%%.*}
+EOF
 }
 
-# Читает поле из строки clients.conf: <name>:<secret>:<port>:<sni>[:<type>]
-conf_field() {
-    local line="$1" field="$2"
-    echo "$line" | cut -d: -f"$field"
+configure_nginx_stub() {
+    local domain="$1" email="$2" tpl_choice="$3"
+
+    install_web_dependencies
+    create_stub_page "$tpl_choice"
+
+    cat > "/etc/nginx/sites-available/${domain}" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+    root /var/www/html;
+    index index.html;
+}
+EOF
+    ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/"
+    rm -f /etc/nginx/sites-enabled/default
+    systemctl restart nginx
+
+    # Получаем SSL сертификат
+    certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" \
+        || die "Не удалось выпустить Let's Encrypt сертификат для $domain"
+
+    # Перебиндим nginx на localhost — mtg займёт внешний порт
+    sed -i 's/listen 443 ssl/listen 127.0.0.1:443 ssl/g' "/etc/nginx/sites-available/${domain}"
+    sed -i '/listen \[::\]:443 ssl/d' "/etc/nginx/sites-available/${domain}"
+    systemctl restart nginx
+
+    touch "$SITE_OWN_FILE"
+    echo "Заглушка и SSL настроены. Nginx слушает на 127.0.0.1:443."
 }
 
-iter_clients() {
-    [[ -f "$CLIENTS_CONF" ]] || return 0
+# ─── Managed fronting domain — полная настройка ───────────────────────────────
+setup_managed_fronting_domain() {
+    local current_domain="${1:-$(read_fronting_domain)}"
+    local public_ip domain email
+    public_ip=$(get_public_ip)
+    [[ -z "$public_ip" || "$public_ip" == "UNKNOWN" ]] && die "Не удалось определить публичный IP сервера"
+
+    echo ""
+    if [[ -n "$current_domain" ]]; then
+        echo "Текущий managed domain: $current_domain"
+    fi
+    read -rp "Введите fronting-домен, уже указывающий на этот сервер: " domain
+    domain="${domain,,}"
+    [[ -z "$domain" ]] && die "Домен не может быть пустым"
+    is_valid_domain "$domain" || die "Некорректный домен"
+    domain_points_to_ip "$domain" "$public_ip" || die "Домен $domain должен резолвиться в $public_ip до продолжения"
+
+    read -rp "Введите Email для SSL сертификата: " email
+    [[ -z "$email" ]] && die "Email не может быть пустым"
+
+    echo ""
+    echo "У вас уже работает HTTPS сайт на этом сервере (на порту 443)?"
+    echo "  1) Нет, установить заглушку (прокси займёт порт 443)"
+    echo "  2) Да, сайт уже есть (прокси займёт другой порт)"
+    echo ""
+    read -rp "Ваш выбор [1/2]: " site_choice
+
+    set_server_hostname "$domain"
+
+    if [[ "$site_choice" == "1" ]]; then
+        echo ""
+        echo "Выберите дизайн для сайта-заглушки:"
+        echo "  1) Вращающийся круг (Spinning Loader)"
+        echo "  2) Пульсирующая точка (Pulse Loader)"
+        echo "  3) Линия загрузки (Progress Bar)"
+        echo ""
+        read -rp "Ваш выбор [1-3]: " tpl_choice
+        tpl_choice="${tpl_choice:-1}"
+        configure_nginx_stub "$domain" "$email" "$tpl_choice"
+    fi
+
+    echo "$domain" > "$FRONTING_DOMAIN_FILE"
+    echo "$email" > "$EMAIL_FILE"
+
+    # Если домен изменился — обновляем секреты managed-клиентов
+    if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
+        replace_client_secrets_for_domain "$current_domain" "$domain"
+    fi
+
+    echo "Managed fronting-домен настроен: $domain"
+}
+
+replace_client_secrets_for_domain() {
+    local old_domain="$1" new_domain="$2"
+    [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
+
+    local tmpfile
+    tmpfile=$(mktemp)
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        echo "$line"
-    done < "$CLIENTS_CONF"
-}
+        local cname csecret cport csni ctype
+        cname=$(conf_field "$line" 1)
+        csecret=$(conf_field "$line" 2)
+        cport=$(conf_field "$line" 3)
+        csni=$(read_client_sni "$line")
+        ctype=$(read_client_type "$line")
 
-client_exists() {
-    local name="$1"
-    grep -q "^${name}:" "$CLIENTS_CONF" 2>/dev/null
-}
-
-# Порт уже занят другим клиентом?
-port_in_use() {
-    local port="$1"
-    [[ -f "$CLIENTS_CONF" ]] || return 1
-    cut -d: -f3 "$CLIENTS_CONF" 2>/dev/null | grep -qx "$port"
-}
-
-system_port_in_use() {
-    local port="$1"
-    ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[\[\]:])${port}$"
-}
-
-# Случайный свободный порт из HTTPS_PORTS; пусто, если все заняты.
-random_free_port() {
-    # Перебираем порты в случайном порядке, возвращаем первый свободный.
-    local ports=("${HTTPS_PORTS[@]}")
-    local n=${#ports[@]} i j tmp
-    for (( i = n - 1; i > 0; i-- )); do
-        j=$(( RANDOM % (i + 1) ))
-        tmp="${ports[i]}"; ports[i]="${ports[j]}"; ports[j]="$tmp"
-    done
-    for p in "${ports[@]}"; do
-        if ! port_in_use "$p" && ! system_port_in_use "$p"; then
-            echo "$p"
-            return 0
+        if [[ "$ctype" == "managed" && "$csni" == "$old_domain" ]]; then
+            local new_secret
+            new_secret=$(generate_secret "$new_domain") || die "Ошибка генерации секрета для $new_domain"
+            echo "$(write_client_record "$cname" "$new_secret" "$cport" "$new_domain" "$ctype")" >> "$tmpfile"
+            write_toml "$cname" "$new_secret" "$cport" "$ctype"
+            restart_container "$cname"
+            echo "Обновлён клиент: $cname"
+        else
+            echo "$line" >> "$tmpfile"
         fi
-    done
-    return 1
+    done < "$CLIENTS_CONF"
+    mv "$tmpfile" "$CLIENTS_CONF"
 }
 
-# ─── Установка mtg ────────────────────────────────────────────────────────────
-install_mtg_binary() {
-    echo "Скачиваю mtg..."
-    local arch
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64)  arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        *) die "Неподдерживаемая архитектура: $arch" ;;
-    esac
-
-    local api_url="https://api.github.com/repos/9seconds/mtg/releases/latest"
-    local release_json
-    release_json=$(curl -sSf "$api_url") || die "Не удалось получить информацию о релизе mtg"
-
-    # Ищем URL: содержит linux и нужную архитектуру, не содержит -v3 или -v9
-    local download_url
-    download_url=$(echo "$release_json" \
-        | grep -o '"browser_download_url": *"[^"]*"' \
-        | grep -o 'https://[^"]*' \
-        | grep "linux" \
-        | grep "$arch" \
-        | grep -v '\-v3\b' \
-        | grep -v '\-v9\b' \
-        | grep '\.tar\.gz$' \
-        | head -1)
-
-    [[ -z "$download_url" ]] && die "Не найден подходящий релиз mtg для linux/$arch"
-
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" RETURN
-
-    curl -sSfL "$download_url" -o "$tmpdir/mtg.tar.gz" || die "Ошибка скачивания mtg"
-    tar -xzf "$tmpdir/mtg.tar.gz" -C "$tmpdir"
-
-    local bin
-    bin=$(find "$tmpdir" -type f -name "mtg" | head -1)
-    [[ -z "$bin" ]] && die "Бинарник mtg не найден в архиве"
-
-    cp "$bin" "$MTG_BIN"
-    chmod +x "$MTG_BIN"
-    echo "mtg установлен: $("$MTG_BIN" --version 2>&1 | head -1)"
-}
-
-# ─── Установка WARP (локально, для одиночного режима) ─────────────────────────
+# ─── WARP ─────────────────────────────────────────────────────────────────────
 install_warp() {
     if command -v warp-cli &>/dev/null; then
         echo "WARP уже установлен."
@@ -520,10 +509,8 @@ cleanup_warp() {
     apt-get update -qq || true
 }
 
-# Регистрация + proxy-режим + подключение. Идемпотентно.
 configure_warp() {
-    local current_status
-    local registration_output
+    local current_status registration_output
     current_status=$(warp-cli status 2>/dev/null || echo "Unknown")
 
     if echo "$current_status" | grep -q "Connected"; then
@@ -535,7 +522,7 @@ configure_warp() {
             if echo "$registration_output" | grep -q "Success"; then
                 :
             elif echo "$registration_output" | grep -q "Old registration is still around"; then
-                echo "WARP уже зарегистрирован, пропускаю повторную регистрацию."
+                echo "WARP уже зарегистрирован."
             else
                 echo "$registration_output"
                 die "Ошибка регистрации WARP"
@@ -547,7 +534,6 @@ configure_warp() {
         warp-cli connect || die "Ошибка подключения WARP"
     fi
 
-    # Ждём, пока SOCKS5 на 127.0.0.1:40000 поднимется
     echo "Ожидаю WARP proxy на ${WARP_SOCKS}..."
     local attempts=0
     while (( attempts < 15 )); do
@@ -561,7 +547,6 @@ configure_warp() {
     die "WARP proxy не слушает на ${WARP_SOCKS} за 30 секунд. Проверьте: warp-cli status"
 }
 
-# Включает локальный WARP: ставит, настраивает, поднимает флаг.
 enable_warp() {
     install_warp
     configure_warp
@@ -569,87 +554,66 @@ enable_warp() {
     echo "Локальный WARP включён."
 }
 
-# ─── Генерация конфига toml ───────────────────────────────────────────────────
+# ─── Генерация toml ──────────────────────────────────────────────────────────
 write_toml() {
-    local name="$1" secret="$2" port="$3"
-    local mode
+    local name="$1" secret="$2" port="$3" ctype="${4:-external}"
+    local mode toml_path local_ip managed_domain
     mode=$(read_mode)
-    local toml_path="$MTG_DIR/${name}.toml"
+    toml_path="$MTG_DIR/${name}.toml"
+    local_ip=$(get_local_ip)
+    managed_domain=$(read_fronting_domain)
 
+    cat > "$toml_path" <<EOF
+secret = "$secret"
+bind-to = "${local_ip}:${port}"
+forward-secrecy = false
+EOF
+
+    # Domain fronting для managed-клиентов
+    if [[ "$ctype" == "managed" && -n "$managed_domain" ]]; then
+        cat >> "$toml_path" <<EOF
+
+[domain-fronting]
+ip = "127.0.0.1"
+port = 443
+EOF
+    fi
+
+    # Сетевой прокси (каскад или WARP)
     if [[ "$mode" == "cascade" ]]; then
         local eu_ip
         eu_ip=$(read_eu_ip)
-        cat > "$toml_path" <<EOF
-secret = "$secret"
-bind-to = "0.0.0.0:$port"
-tolerate-time-skewness = "5s"
+        cat >> "$toml_path" <<EOF
 
 [network]
 proxies = ["socks5://${eu_ip}:1080"]
-
-[defense.anti-replay]
-enabled = true
-max-size = "1mib"
-error-rate = 0.001
-
-[defense.doppelganger]
-drs = true
 EOF
     elif warp_enabled; then
-        cat > "$toml_path" <<EOF
-secret = "$secret"
-bind-to = "0.0.0.0:$port"
-tolerate-time-skewness = "5s"
+        cat >> "$toml_path" <<EOF
 
 [network]
 proxies = ["socks5://${WARP_SOCKS}"]
-
-[defense.anti-replay]
-enabled = true
-max-size = "1mib"
-error-rate = 0.001
-
-[defense.doppelganger]
-drs = true
-EOF
-    else
-        cat > "$toml_path" <<EOF
-secret = "$secret"
-bind-to = "0.0.0.0:$port"
-tolerate-time-skewness = "5s"
-
-[defense.anti-replay]
-enabled = true
-max-size = "1mib"
-error-rate = 0.001
-
-[defense.doppelganger]
-drs = true
 EOF
     fi
-}
 
-# ─── Systemd-юнит ─────────────────────────────────────────────────────────────
-write_service() {
-    local name="$1"
-    cat > "/etc/systemd/system/mtg-${name}.service" <<EOF
-[Unit]
-Description=MTG Proxy - $name
-After=network.target
+    # Защита
+    cat >> "$toml_path" <<EOF
 
-[Service]
-ExecStart=$MTG_BIN run $MTG_DIR/${name}.toml
-Restart=always
-RestartSec=5
+[defense.anti-replay]
+enabled = true
+max-size = "1mib"
+error-rate = 0.001
 
-[Install]
-WantedBy=multi-user.target
+[defense.doppelganger]
+drs = true
 EOF
 }
 
-# ─── Добавление клиента ───────────────────────────────────────────────────────
+# ─── Добавление клиента ──────────────────────────────────────────────────────
 add_client() {
     local default_name="${1:-}"
+    local default_port="${2:-}"
+    local default_profile="${3:-}"
     local managed_domain
     managed_domain=$(read_fronting_domain)
 
@@ -661,8 +625,6 @@ add_client() {
     else
         name="$default_name"
     fi
-
-    # Убираем \r на случай Windows-переносов
     name=$(echo "$name" | tr -d '\r')
 
     if [[ "$name" =~ [[:space:]:] ]]; then
@@ -678,12 +640,16 @@ add_client() {
         return 1
     fi
 
-    # Порт. Enter → случайный свободный порт из HTTPS-диапазона.
+    # Порт
     local port
-    read -rp "Введите порт [Enter — случайный HTTPS-порт]: " port
-    if [[ -z "$port" ]]; then
-        port=$(random_free_port) || { echo "Все HTTPS-порты заняты, введите порт вручную."; return 1; }
-        echo "Выбран случайный порт: $port"
+    if [[ -z "$default_port" ]]; then
+        read -rp "Введите порт [Enter — случайный HTTPS-порт]: " port
+        if [[ -z "$port" ]]; then
+            port=$(random_free_port) || { echo "Все HTTPS-порты заняты, введите порт вручную."; return 1; }
+            echo "Выбран случайный порт: $port"
+        fi
+    else
+        port="$default_port"
     fi
     if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
         echo "Некорректный порт."
@@ -693,22 +659,21 @@ add_client() {
         echo "Порт $port уже занят другим клиентом."
         return 1
     fi
-    if system_port_in_use "$port"; then
-        echo "Порт $port уже занят другим сервисом на сервере."
-        return 1
-    fi
 
+    # Профиль клиента
     local client_profile client_type sni_domain
-    client_profile=$(pick_client_profile "$managed_domain")
+    if [[ -z "$default_profile" ]]; then
+        client_profile=$(pick_client_profile "$managed_domain")
+    else
+        client_profile="$default_profile"
+    fi
     client_type=${client_profile%%:*}
     sni_domain=${client_profile#*:}
-    validate_client_runtime "$client_type" "$sni_domain" "$port"
 
     # Генерация секрета
     echo "Генерирую секрет..."
     local secret
-
-    secret=$("$MTG_BIN" generate-secret "$sni_domain" 2>/dev/null)
+    secret=$(generate_secret "$sni_domain")
     if [[ -z "$secret" ]]; then
         die "Ошибка генерации секрета"
     fi
@@ -717,15 +682,14 @@ add_client() {
     # Сохранение
     mkdir -p "$MTG_DIR"
     write_client_record "$name" "$secret" "$port" "$sni_domain" "$client_type" >> "$CLIENTS_CONF"
-
-    write_toml "$name" "$secret" "$port"
-    write_service "$name"
+    write_toml "$name" "$secret" "$port" "$client_type"
 
     ufw allow "${port}/tcp" > /dev/null 2>&1 || true
     ufw --force enable > /dev/null 2>&1 || true
 
-    systemctl daemon-reload
-    systemctl enable --now "mtg-${name}"
+    # Запуск контейнера
+    start_container "$name"
+    sleep 2
 
     echo ""
     echo "Проверяю конфигурацию mtg..."
@@ -735,31 +699,41 @@ add_client() {
         echo "Ссылка ниже всё равно выведена, но сначала исправьте замечания doctor."
     fi
 
-    local public_ip
-    public_ip=$(get_public_ip)
+    # Ссылка
+    local server_addr
+    if [[ "$client_type" == "managed" && -n "$managed_domain" ]]; then
+        server_addr="$managed_domain"
+    else
+        server_addr=$(get_public_ip)
+    fi
     echo ""
     echo "Клиент $name создан. Тип: $(client_type_label "$client_type")."
-    echo "tg://proxy?server=${public_ip}&port=${port}&secret=${secret}"
+    echo "tg://proxy?server=${server_addr}&port=${port}&secret=${secret}"
     echo ""
 }
 
-# ─── Управление клиентами ─────────────────────────────────────────────────────
+# ─── Управление клиентами ────────────────────────────────────────────────────
 list_clients() {
     if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
         echo "Клиентов нет."
         return
     fi
-    printf "\n%-3s %-20s %-8s %-18s %s\n" "#" "Имя" "Порт" "Тип" "Секрет"
-    printf "%-3s %-20s %-8s %-18s %s\n" "---" "--------------------" "--------" "------------------" "------"
+    printf "\n%-3s %-20s %-8s %-18s %-10s %s\n" "#" "Имя" "Порт" "Тип" "Docker" "Секрет"
+    printf "%-3s %-20s %-8s %-18s %-10s %s\n" "---" "--------------------" "--------" "------------------" "----------" "------"
     local i=1
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname cport csecret ctype
+        local cname cport csecret ctype docker_status
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         ctype=$(read_client_type "$line")
-        printf "%-3s %-20s %-8s %-18s %s\n" "$i" "$cname" "$cport" "$ctype" "${csecret:0:16}..."
+        if container_running "$cname"; then
+            docker_status="✓ UP"
+        else
+            docker_status="✗ DOWN"
+        fi
+        printf "%-3s %-20s %-8s %-18s %-10s %s\n" "$i" "$cname" "$cport" "$ctype" "$docker_status" "${csecret:0:16}..."
         (( i++ ))
     done < "$CLIENTS_CONF"
     echo ""
@@ -778,16 +752,13 @@ delete_client() {
         return 1
     fi
 
-    local line
+    local line port
     line=$(grep "^${name}:" "$CLIENTS_CONF")
-    local port
     port=$(conf_field "$line" 3)
 
-    kill_service "mtg-${name}"
-    systemctl disable "mtg-${name}" 2>/dev/null || true
-    rm -f "/etc/systemd/system/mtg-${name}.service" "$MTG_DIR/${name}.toml"
+    stop_container "$name"
+    rm -f "$MTG_DIR/${name}.toml"
 
-    # Удаляем строку из clients.conf
     local tmpfile
     tmpfile=$(mktemp)
     grep -v "^${name}:" "$CLIENTS_CONF" > "$tmpfile" || true
@@ -827,29 +798,50 @@ show_links() {
         return
     fi
 
-    local public_ip
+    local public_ip managed_domain
     public_ip=$(get_public_ip)
+    managed_domain=$(read_fronting_domain)
     echo ""
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport csni ctype
+        local cname csecret cport csni ctype server_addr
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
         csni=$(read_client_sni "$line")
         ctype=$(read_client_type "$line")
+
+        if [[ "$ctype" == "managed" && -n "$managed_domain" ]]; then
+            server_addr="$managed_domain"
+        else
+            server_addr="$public_ip"
+        fi
         echo "Клиент: $cname  Тип: $(client_type_label "$ctype")  SNI: $csni"
-        echo "tg://proxy?server=${public_ip}&port=${cport}&secret=${csecret}"
+        echo "tg://proxy?server=${server_addr}&port=${cport}&secret=${csecret}"
         echo ""
     done < "$CLIENTS_CONF"
 }
 
-# ─── Статус сервисов ──────────────────────────────────────────────────────────
+# ─── Статус ───────────────────────────────────────────────────────────────────
 show_status() {
     if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
         echo "Клиентов нет."
         return
     fi
+
+    echo ""
+    echo "=== Статус Nginx ==="
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        echo "Nginx: РАБОТАЕТ"
+    else
+        echo "Nginx: не запущен"
+    fi
+    echo ""
+
+    echo "=== Docker-контейнеры ==="
+    docker ps --filter "name=mtg-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "Docker не доступен"
+    echo ""
+
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname csni ctype cport
@@ -859,19 +851,15 @@ show_status() {
         ctype=$(read_client_type "$line")
         echo ""
         echo "--- mtg-${cname} ---"
-        echo "Тип: $(client_type_label "$ctype")"
-        echo "SNI: $csni"
-        validate_client_runtime "$ctype" "$csni" "$cport" 2>/dev/null || true
-        systemctl status "mtg-${cname}" --no-pager -l 2>/dev/null || echo "Сервис не найден."
-        echo ""
-        echo "doctor:"
-        run_mtg_doctor "$cname" 2>/dev/null || true
+        echo "Тип: $(client_type_label "$ctype")  SNI: $csni  Порт: $cport"
+        if container_running "$cname"; then
+            echo "Контейнер: РАБОТАЕТ"
+            echo "Последние логи:"
+            docker logs --tail 10 "mtg-${cname}" 2>&1 || true
+        else
+            echo "Контейнер: НЕ ЗАПУЩЕН"
+        fi
     done < "$CLIENTS_CONF"
-}
-
-configure_fronting_domain_menu() {
-    setup_managed_fronting_domain
-    pause
 }
 
 # ─── Управление (рестарт / обновление / удаление) ────────────────────────────
@@ -884,7 +872,7 @@ force_stop_all() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        kill_service "mtg-${cname}"
+        stop_container "$cname"
         echo "Остановлен: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
@@ -898,30 +886,25 @@ restart_all() {
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        kill_service "mtg-${cname}"
-        systemctl start "mtg-${cname}" && echo "Перезапущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
+        restart_container "$cname"
+        echo "Перезапущен: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
 update_mtg() {
+    force_stop_all
+    echo ""
+    pull_mtg_image
+    echo ""
+
     if [[ ! -f "$CLIENTS_CONF" ]] || [[ ! -s "$CLIENTS_CONF" ]]; then
-        echo "Клиентов нет."
         return 0
     fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local cname
         cname=$(conf_field "$line" 1)
-        kill_service "mtg-${cname}"
-    done < "$CLIENTS_CONF"
-
-    install_mtg_binary
-
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname
-        cname=$(conf_field "$line" 1)
-        systemctl start "mtg-${cname}" && echo "Запущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
+        start_container "$cname" && echo "Запущен: mtg-${cname}" || echo "Ошибка: mtg-${cname}"
     done < "$CLIENTS_CONF"
 }
 
@@ -938,18 +921,7 @@ bind_eu_server() {
         return 0
     fi
 
-    ensure_runtime_client_consistency
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname csecret cport
-        cname=$(conf_field "$line" 1)
-        csecret=$(conf_field "$line" 2)
-        cport=$(conf_field "$line" 3)
-        write_toml "$cname" "$csecret" "$cport"
-        kill_service "mtg-${cname}"
-        systemctl start "mtg-${cname}" 2>/dev/null || true
-    done < "$CLIENTS_CONF"
-
+    rewrite_all_clients
     echo "EU-сервер привязан: $eu_ip"
 }
 
@@ -962,18 +934,7 @@ unbind_eu_server() {
         return 0
     fi
 
-    ensure_runtime_client_consistency
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local cname csecret cport
-        cname=$(conf_field "$line" 1)
-        csecret=$(conf_field "$line" 2)
-        cport=$(conf_field "$line" 3)
-        write_toml "$cname" "$csecret" "$cport"
-        kill_service "mtg-${cname}"
-        systemctl start "mtg-${cname}" 2>/dev/null || true
-    done < "$CLIENTS_CONF"
-
+    rewrite_all_clients
     rm -f "$EU_IP_FILE"
     echo "EU-сервер отвязан. Режим: одиночный. Трафик идёт напрямую."
 }
@@ -982,49 +943,63 @@ remove_all() {
     read -rp "Удалить всё? Это действие необратимо. [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено."; return; }
 
+    # Останавливаем и удаляем все Docker-контейнеры mtg
     if [[ -f "$CLIENTS_CONF" ]]; then
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local cname
             cname=$(conf_field "$line" 1)
-            kill_service "mtg-${cname}"
-            systemctl disable "mtg-${cname}" 2>/dev/null || true
-            rm -f "/etc/systemd/system/mtg-${cname}.service" "$MTG_DIR/${cname}.toml"
+            stop_container "$cname"
         done < "$CLIENTS_CONF"
     fi
 
-    # Для чистой установки удаляем и конфигурацию, и пакет WARP.
+    # Удаляем WARP если был включён
     if [[ -f "$WARP_FILE" ]] || command -v warp-cli &>/dev/null; then
         cleanup_warp
     fi
 
-    rm -f "$MTG_BIN"
+    # Удаляем nginx заглушку если мы её ставили
+    if site_is_own; then
+        local domain
+        domain=$(read_fronting_domain)
+        rm -f "/etc/nginx/sites-enabled/${domain}" 2>/dev/null || true
+        rm -f "/etc/nginx/sites-available/${domain}" 2>/dev/null || true
+        systemctl restart nginx 2>/dev/null || true
+    fi
+
+    # Удаляем старые systemd-юниты (миграция с предыдущей версии)
+    for unit_file in /etc/systemd/system/mtg-*.service; do
+        [[ -f "$unit_file" ]] || continue
+        local svc_name
+        svc_name=$(basename "$unit_file" .service)
+        systemctl stop "$svc_name" 2>/dev/null || true
+        systemctl disable "$svc_name" 2>/dev/null || true
+        rm -f "$unit_file"
+    done
+
     rm -f /usr/local/bin/vi-mtpro
     rm -f /usr/local/lib/vi-mtpro.sh
-    rm -f /etc/nginx/sites-enabled/vi-mtpro-fronting.conf
-    rm -f /etc/nginx/sites-available/vi-mtpro-fronting.conf
+    rm -f /usr/local/bin/mtg
     rm -rf "$MTG_DIR"
+    systemctl daemon-reload 2>/dev/null || true
     echo "Удалено."
     exit 0
 }
 
-# Перезаписывает toml всех клиентов и перезапускает их сервисы.
 rewrite_all_clients() {
     [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]] || return 0
-    ensure_runtime_client_consistency
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local cname csecret cport
+        local cname csecret cport ctype
         cname=$(conf_field "$line" 1)
         csecret=$(conf_field "$line" 2)
         cport=$(conf_field "$line" 3)
-        write_toml "$cname" "$csecret" "$cport"
-        kill_service "mtg-${cname}"
-        systemctl start "mtg-${cname}" 2>/dev/null || true
+        ctype=$(read_client_type "$line")
+        write_toml "$cname" "$csecret" "$cport" "$ctype"
+        restart_container "$cname"
     done < "$CLIENTS_CONF"
 }
 
-# Включить / выключить локальный WARP в одиночном режиме.
 toggle_warp() {
     if warp_enabled; then
         read -rp "Отключить локальный WARP? Трафик пойдёт напрямую. [y/N]: " confirm
@@ -1042,6 +1017,11 @@ toggle_warp() {
     fi
 }
 
+configure_fronting_domain_menu() {
+    setup_managed_fronting_domain
+    pause
+}
+
 manage_menu() {
     while true; do
         local mode
@@ -1049,9 +1029,9 @@ manage_menu() {
         menu_clear
         echo ""
         echo "=== Управление ==="
-        echo "1) Перезапустить все сервисы"
-        echo "2) Обновить mtg"
-        echo "3) Принудительная остановка всех сервисов"
+        echo "1) Перезапустить все контейнеры"
+        echo "2) Обновить mtg (pull новый образ)"
+        echo "3) Принудительная остановка всех контейнеров"
         if [[ "$mode" == "cascade" ]]; then
             echo "4) Привязать EU-сервер"
             echo "5) Отвязать EU-сервер"
@@ -1112,9 +1092,9 @@ manage_menu() {
 setup_single() {
     echo "Устанавливаю зависимости..."
     apt-get update -qq
-    apt-get install -y curl wget ufw
+    apt-get install -y curl wget ufw docker.io
 
-    install_mtg_binary
+    pull_mtg_image
 
     mkdir -p "$MTG_DIR"
     echo "single" > "$MODE_FILE"
@@ -1136,7 +1116,20 @@ setup_single() {
 
     echo ""
     echo "Создаём первого клиента:"
-    add_client "default"
+    local managed_domain first_port
+    managed_domain=$(read_fronting_domain)
+    if [[ -n "$managed_domain" ]]; then
+        if site_is_own; then
+            # Мы поставили заглушку — порт 443 свободен для mtg
+            first_port="443"
+        else
+            # Сайт уже был — берём случайный порт
+            first_port=$(random_free_port) || first_port="8443"
+        fi
+        add_client "default" "$first_port" "managed:$managed_domain"
+    else
+        add_client "default"
+    fi
 
     echo ""
     echo "Установка завершена. Режим: одиночный$(warp_enabled && echo " + WARP")."
@@ -1146,9 +1139,9 @@ setup_single() {
 setup_cascade() {
     echo "Устанавливаю зависимости..."
     apt-get update -qq
-    apt-get install -y curl wget ufw
+    apt-get install -y curl wget ufw docker.io
 
-    install_mtg_binary
+    pull_mtg_image
 
     local eu_ip
     read -rp "Введите IP EU-сервера: " eu_ip
@@ -1168,7 +1161,18 @@ setup_cascade() {
 
     echo ""
     echo "Создаём первого клиента:"
-    add_client "default"
+    local managed_domain first_port
+    managed_domain=$(read_fronting_domain)
+    if [[ -n "$managed_domain" ]]; then
+        if site_is_own; then
+            first_port="443"
+        else
+            first_port=$(random_free_port) || first_port="8443"
+        fi
+        add_client "default" "$first_port" "managed:$managed_domain"
+    else
+        add_client "default"
+    fi
 
     echo ""
     echo "============================================================"
@@ -1209,22 +1213,7 @@ switch_mode() {
         read -rp "Введите IP EU-сервера: " eu_ip
         [[ -z "$eu_ip" ]] && { echo "IP не может быть пустым."; echo "single" > "$MODE_FILE"; return 1; }
         echo "$eu_ip" > "$EU_IP_FILE"
-
-        # Перезаписываем toml для всех клиентов
-        if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
-            ensure_runtime_client_consistency
-            while IFS= read -r line; do
-                [[ -z "$line" ]] && continue
-                local cname csecret cport
-                cname=$(conf_field "$line" 1)
-                csecret=$(conf_field "$line" 2)
-                cport=$(conf_field "$line" 3)
-                write_toml "$cname" "$csecret" "$cport"
-                kill_service "mtg-${cname}"
-                systemctl start "mtg-${cname}" 2>/dev/null || true
-            done < "$CLIENTS_CONF"
-        fi
-
+        rewrite_all_clients
         echo ""
         echo "Режим изменён на каскад. EU-сервер: $eu_ip"
         echo "Не забудьте запустить tunnel.sh на EU-сервере!"
@@ -1234,26 +1223,26 @@ switch_mode() {
 # ─── Главное меню ─────────────────────────────────────────────────────────────
 main_menu() {
     while true; do
-        local mode
+        local mode eu_ip mode_label fronting_domain
         mode=$(read_mode)
-        local eu_ip
         eu_ip=$(read_eu_ip)
 
-        local mode_label
         if [[ "$mode" == "cascade" ]]; then
             mode_label="каскад (EU: ${eu_ip:-не задан})"
         else
             mode_label="одиночный"
         fi
-        local fronting_domain
         fronting_domain=$(read_fronting_domain)
 
         menu_clear
         echo ""
-        echo "=== MTProxy Setup ==="
+        echo "=== Vi-MTProxy (Docker) ==="
         echo "Режим: $mode_label"
         if [[ -n "$fronting_domain" ]]; then
             echo "Managed fronting domain: $fronting_domain"
+        fi
+        if warp_enabled; then
+            echo "WARP: ВКЛ"
         fi
         echo "---"
         echo "1) Управление клиентами (добавить / список / удалить)"
@@ -1296,7 +1285,7 @@ fi
 
 if [[ ! -f "$MODE_FILE" ]]; then
     echo ""
-    echo "=== MTProxy Setup ==="
+    echo "=== Vi-MTProxy Setup (Docker) ==="
     echo "Выберите режим:"
     echo "1) Одиночный (без каскада) — всё на одном сервере"
     echo "2) Каскад — этот сервер (RU) → второй сервер (EU) → WARP"
@@ -1317,22 +1306,10 @@ if [[ $# -ge 2 && "$1" == "set-eu" ]]; then
     echo "$eu_ip" > "$EU_IP_FILE"
     echo "cascade" > "$MODE_FILE"
 
-    if [[ -f "$CLIENTS_CONF" ]] && [[ -s "$CLIENTS_CONF" ]]; then
-        ensure_runtime_client_consistency
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            local cname csecret cport
-            cname=$(conf_field "$line" 1)
-            csecret=$(conf_field "$line" 2)
-            cport=$(conf_field "$line" 3)
-            write_toml "$cname" "$csecret" "$cport"
-            kill_service "mtg-${cname}"
-            systemctl start "mtg-${cname}" 2>/dev/null || true
-        done < "$CLIENTS_CONF"
-    fi
+    rewrite_all_clients
 
     echo "EU-сервер привязан: $eu_ip"
-    echo "Все сервисы перезапущены."
+    echo "Все контейнеры перезапущены."
     exit 0
 fi
 
