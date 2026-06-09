@@ -5,7 +5,7 @@
 ---
 
 <a name="english"></a>
-# Vi-MTPro (Cascade + WARP) — English
+# Vi-MTPro (Cascade + WARP)
 
 A quick installation of MTProxy in Docker containers with cascade support via WARP and masquerading as a normal HTTPS site.
 
@@ -105,7 +105,7 @@ The script will install WARP and gost, and start a SOCKS5 tunnel on port 1080. A
 ---
 
 <a name="русский"></a>
-# Vi-MTPro (Docker + Cascade + WARP) — Русский
+# Vi-MTPro (Docker + Cascade + WARP)
 
 Быстрая установка MTProxy в Docker-контейнерах с поддержкой каскада через WARP и маскировкой под обычный HTTPS-сайт.
 
